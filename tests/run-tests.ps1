@@ -128,6 +128,20 @@ try {
     $o2 = Run 'organize-plan.ps1' @('-SessionDir', $session, '-Root', ($env:SystemDrive + '\'))
     Assert ($o1 -match '不建議整理') '拒絕使用者資料夾本身'
     Assert ($o2 -match '不建議整理') '拒絕磁碟根目錄'
+    $appDataRoot = Join-Path $env:USERPROFILE 'AppData'
+    Assert ((Run 'organize-plan.ps1' @('-SessionDir', $session, '-Root', $appDataRoot)) -match '不建議整理') '拒絕 AppData 本身'
+    $lowDir = Join-Path $appDataRoot 'LocalLow'
+    if (Test-Path $lowDir) { Assert ((Run 'organize-plan.ps1' @('-SessionDir', $session, '-Root', $lowDir)) -match '不建議整理') '拒絕 AppData\LocalLow' }
+    Assert ((Run 'organize-plan.ps1' @('-SessionDir', $session, '-Root', $env:TEMP)) -match '不建議整理') '拒絕 Temp 本身（只允許 Temp 底下的子資料夾）'
+    $shortPf = (Get-ChildItem -LiteralPath ($env:SystemDrive + '\') -Filter 'PROGRA~1' -Force -ErrorAction SilentlyContinue | Select-Object -First 1)
+    if ($shortPf -and (Test-Path ($env:SystemDrive + '\PROGRA~1'))) {
+        Assert ((Run 'organize-plan.ps1' @('-SessionDir', $session, '-Root', ($env:SystemDrive + '\PROGRA~1'))) -match '不建議整理') '拒絕 8.3 短檔名的 Program Files'
+    } else { Write-Host '  SKIP  這台電腦沒有 8.3 短檔名，略過 PROGRA~1 測試' }
+    $toProfile = Join-Path $work 'to-profile'
+    New-Item -ItemType Junction -Path $toProfile -Target $env:USERPROFILE | Out-Null
+    try { Assert ((Run 'organize-plan.ps1' @('-SessionDir', $session, '-Root', $toProfile)) -match '不建議整理') '拒絕指向使用者資料夾的 junction' }
+    finally { [IO.Directory]::Delete($toProfile, $false) }  # 只刪連結本身，不碰目標
+    Assert ((Test-Path $env:USERPROFILE) -and -not (Test-Path $toProfile)) '測試用 junction 已移除，目標完好'
     Assert (@(Get-ChildItem $session -Filter 'organize-plan-*.csv').Count -eq $planCount) '被拒絕時沒有產生計畫'
     Assert ($byName['report (1).pdf'].Keep -like '*\report.pdf') '重複檔的計畫記下保留的那份'
     Assert ($byName['openai-recovery-codes.txt'] -and ((Run 'organize-plan.ps1' @('-SessionDir', $session, '-Root', $dl)) -notmatch 'openai-recovery')) '輸出不印出敏感檔名'

@@ -137,7 +137,9 @@ function Get-PccRecycleBinBlocker {
     # 網路或卸除式磁碟、群組原則停用資源回收筒、該磁碟設定為「不要移到資源回收筒」、項目大於資源回收筒上限。
     # 資源回收筒只是已滿（但放得下這個項目）時，Windows 會清掉最舊的項目騰出空間，不會永久刪除這個項目。
     param([string]$Path, [int64]$Bytes)
-    $full = [System.IO.Path]::GetFullPath($Path)
+    if ($Path -like '\\?\UNC\*') { return '網路路徑沒有資源回收筒' }
+    if ($Path -like '\\?\*') { $Path = $Path.Substring(4) }
+    try { $full = [System.IO.Path]::GetFullPath($Path) } catch { return "無法解析路徑：$($_.Exception.Message)" }
     if ($full.StartsWith('\\')) { return '網路路徑沒有資源回收筒' }
     $drive = $full.Substring(0, 2).ToUpper()
     if (-not $script:PccBinInfo.ContainsKey($drive)) {
@@ -149,13 +151,15 @@ function Get-PccRecycleBinBlocker {
                 if ((Get-ItemProperty -LiteralPath $k -Name NoRecycleFiles -ErrorAction SilentlyContinue).NoRecycleFiles -eq 1) { $info.Blocker = '群組原則停用了資源回收筒' }
             }
             $vol = Get-CimInstance Win32_Volume -Filter "DriveLetter='$drive'" -ErrorAction SilentlyContinue | Select-Object -First 1
-            if (-not $info.Blocker -and $vol -and $vol.DeviceID -match '\{[0-9a-fA-F-]+\}') {
+            # 找不到對應的磁碟區（subst 虛擬磁碟、WMI 異常）就無法確認資源回收筒設定，直接拒絕
+            if (-not $info.Blocker -and -not ($vol -and $vol.DeviceID -match '\{[0-9a-fA-F-]+\}')) { $info.Blocker = "找不到 $drive 的磁碟區資訊（可能是 subst 虛擬磁碟），無法確認資源回收筒設定" }
+            if (-not $info.Blocker -and $vol.DeviceID -match '\{[0-9a-fA-F-]+\}') {
                 $p = Get-ItemProperty -LiteralPath "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\BitBucket\Volume\$($Matches[0])" -ErrorAction SilentlyContinue
                 if ($p -and $p.NukeOnDelete -eq 1) { $info.Blocker = "$drive 的資源回收筒設定為「不要將檔案移到資源回收筒」" }
                 elseif ($p -and $p.MaxCapacity) { $info.Cap = [int64]$p.MaxCapacity * 1MB }
             }
-            # 讀不到設定時用保守的估計：磁碟容量的 5%
-            if (-not $info.Cap) { $info.Cap = [int64]([double]$disk.Size * 0.05) }
+            # 磁碟區存在但沒有登錄設定（從未調整過資源回收筒）時，用保守的估計：磁碟容量的 5%
+            if (-not $info.Blocker -and -not $info.Cap) { $info.Cap = [int64]([double]$disk.Size * 0.05) }
         }
         $script:PccBinInfo[$drive] = $info
     }

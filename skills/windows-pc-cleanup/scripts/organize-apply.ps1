@@ -35,7 +35,8 @@ foreach ($r in $rows) {
             # 重複檔：執行前重新確認保留的那份還在、內容仍然相同
             $keep = if ($r.PSObject.Properties['Keep']) { $r.Keep } else { '' }
             if ($keep -and -not (Test-Path -LiteralPath $keep -PathType Leaf)) { $status = 'SKIPPED: 保留的那份已不存在'; throw [System.OperationCanceledException]::new() }
-            if ($keep -and (Get-FileHash -LiteralPath $keep -Algorithm SHA256).Hash -ne (Get-FileHash -LiteralPath $r.Source -Algorithm SHA256).Hash) {
+            # 讀不到檔案時讓 Get-FileHash 丟出例外，記為 FAILED 並帶出真正原因
+            if ($keep -and (Get-FileHash -LiteralPath $keep -Algorithm SHA256 -ErrorAction Stop).Hash -ne (Get-FileHash -LiteralPath $r.Source -Algorithm SHA256 -ErrorAction Stop).Hash) {
                 $status = 'SKIPPED: 與保留的那份內容已不同'; throw [System.OperationCanceledException]::new()
             }
             if ($QuarantineDir) {

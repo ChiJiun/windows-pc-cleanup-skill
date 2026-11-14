@@ -57,5 +57,5 @@ Write-PccAction -SessionDir $SessionDir -Category '清理' -Action "刪除超過
     -Command "clean-old-files.ps1 -Path `"$root`" -OlderThanDays $OlderThanDays -Apply$(if ($Recycle) { ' -Recycle' })" `
     -BytesFreed $okBytes -Result $result -Reversible $(if ($Recycle) { 'recycle-bin' } else { 'no' }) `
     -UndoHint $(if ($Recycle) { '從資源回收筒還原' } else { '暫存檔，無法還原，也不需要還原' }) `
-    -Evidence (Split-Path $detail -Leaf) -Note "刪除 $ok 個，略過 $fail 個（被占用$(if ($Recycle) { '或無法進資源回收筒' })）"
+    -Evidence (Split-Path $detail -Leaf) -Note "刪除 $ok 個，略過 $fail 個（被占用、唯讀或沒有權限$(if ($Recycle) { '、無法進資源回收筒' })；原因見明細）"
 "已刪除 $ok 個檔案（$(Format-PccSize $okBytes)），略過 $fail 個。明細：$detail"

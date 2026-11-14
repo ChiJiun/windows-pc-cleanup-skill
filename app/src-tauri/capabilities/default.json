@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "主視窗只需要核心權限；開啟檔案與網址由後端 command 自行檢查後處理",
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}

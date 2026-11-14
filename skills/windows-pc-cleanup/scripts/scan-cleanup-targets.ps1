@@ -43,6 +43,9 @@ $items = foreach ($c in $catalog) {
         IsLink = ($real -ne (Get-Item -LiteralPath $c.path -Force).FullName)
         Bytes = $s.Bytes; Files = $s.Files; OldBytes = $s.OldBytes
         Risk = $c.risk; Method = $c.method
+        # 給桌面版判斷可以自動處理的方式：clean-old-files、clear-folder，其餘只能手動（例如官方清理指令）
+        Action = if ($c.id -eq 'user-temp') { 'clean-old-files' } elseif ($c.risk -eq 'A' -and $c.method -match 'clear-folder') { 'clear-folder' } else { 'manual' }
+        Procs = @($c.procs)
         RunningApps = @(Get-PccRunningProcesses $c.procs)
     }
 }

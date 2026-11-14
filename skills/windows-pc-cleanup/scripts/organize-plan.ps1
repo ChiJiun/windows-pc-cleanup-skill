@@ -66,6 +66,16 @@ function Get-Topic([string]$name) {
 }
 
 $reserved = @($rules.types | ForEach-Object { $_.name }) + @($rules.otherType, $rules.subfolders.target, $rules.logFolder)
+# 每種語言的內建規則都要保留，避免換語言重新整理時，把另一種語言的分類資料夾與還原紀錄整批搬走
+foreach ($rf in Get-ChildItem -LiteralPath (Join-Path $PSScriptRoot '..\assets') -Filter 'organize-rules*.json' -ErrorAction SilentlyContinue) {
+    $r2 = Read-PccJson $rf.FullName
+    if ($r2) { $reserved += @($r2.types | ForEach-Object { $_.name }) + @($r2.otherType, $r2.subfolders.target, $r2.logFolder) }
+}
+$reserved = @($reserved | Where-Object { $_ } | Select-Object -Unique)
+# 含有整理紀錄或還原腳本的資料夾（例如自訂規則的紀錄資料夾）也一律不搬，否則舊的還原指令會失效
+function Test-OrganizeLogFolder([string]$Dir) {
+    [bool](Get-ChildItem -LiteralPath $Dir -File -Force -ErrorAction SilentlyContinue | Where-Object { $_.Name -eq 'organize-undo.ps1' -or $_.Name -like 'organize-log-*.csv' } | Select-Object -First 1)
+}
 $files = @(Get-ChildItem -LiteralPath $Root -File -Force | Where-Object { $_.Name -ne 'desktop.ini' })
 $plan = New-Object System.Collections.Generic.List[object]
 $handled = @{}
@@ -105,7 +115,7 @@ foreach ($f in $files) {
 }
 
 if ($rules.subfolders.move) {
-    Get-ChildItem -LiteralPath $Root -Directory -Force | Where-Object { $reserved -notcontains $_.Name } | ForEach-Object {
+    Get-ChildItem -LiteralPath $Root -Directory -Force | Where-Object { $reserved -notcontains $_.Name -and -not (Test-OrganizeLogFolder $_.FullName) } | ForEach-Object {
         Add-Plan $_.FullName 'Move' (Join-Path (Join-Path $Root $rules.subfolders.target) $_.Name) (Msg '子資料夾集中' 'gather subfolders') $rules.subfolders.target
     }
 }

@@ -236,6 +236,23 @@ try {
       [pscustomobject]@{ Source = 'C:\x\b.txt'; Action = 'Recycle'; Final = $legacyMarker; Status = 'OK'; Reason = '' }) | Export-Csv -LiteralPath $binLog -NoTypeInformation -Encoding UTF8
     $binOut = Run 'organize-undo.ps1' @('-Log', $binLog, '-Lang', 'en')
     Assert ($binOut -match '0 entries can be restored; 2 more are in the Recycle Bin') "undo 認得新舊標記且輸出英文（輸出：$($binOut.Trim())）"
+
+    Write-Host '== 換語言重新整理不會搬走另一種語言的分類與紀錄 =='
+    $mix = Join-Path $work 'mix'; New-Item -ItemType Directory -Path $mix | Out-Null
+    'hw' | Set-Content (Join-Path $mix 'HW2.pdf'); 'img' | Set-Content (Join-Path $mix 'pic.png')
+    $mixSession = Join-Path $work 'mix-session'
+    Run 'organize-plan.ps1' @('-SessionDir', $mixSession, '-Root', $mix, '-Lang', 'zh-TW') | Out-Null
+    $mixPlan = (Get-ChildItem $mixSession -Filter 'organize-plan-*.csv' | Select-Object -First 1).FullName
+    Run 'organize-apply.ps1' @('-SessionDir', $mixSession, '-Plan', $mixPlan, '-QuarantineDir', (Join-Path $work 'mix-q'), '-Apply', '-Lang', 'zh-TW') | Out-Null
+    # 自訂名稱的紀錄資料夾（裡面有還原腳本）也不能被搬走
+    $custom = Join-Path $mix 'my-logs'; New-Item -ItemType Directory -Path $custom | Out-Null
+    'x' | Set-Content (Join-Path $custom 'organize-undo.ps1')
+    New-Item -ItemType Directory -Path (Join-Path $mix 'random-folder') | Out-Null
+    $topBefore = @(Get-ChildItem $mix -Directory | ForEach-Object Name)
+    Run 'organize-plan.ps1' @('-SessionDir', $mixSession, '-Root', $mix, '-Lang', 'en') | Out-Null
+    $mixPlan2 = @(Get-ChildItem $mixSession -Filter 'organize-plan-*.csv' | Sort-Object LastWriteTime | Select-Object -Last 1)[0].FullName
+    $moved = @(Import-Csv $mixPlan2 | ForEach-Object { Split-Path $_.Source -Leaf })
+    Assert ($moved.Count -eq 1 -and $moved[0] -eq 'random-folder') "英文重新整理只搬一般子資料夾（第一次整理後的資料夾：$($topBefore -join ', ')；計畫：$($moved -join ', ')）"
     $enOut = Join-Path $enSession 'report.html'
     Run 'build-report.ps1' @('-SessionDir', $enSession, '-Lang', 'en') | Out-Null
     $enHtml = [IO.File]::ReadAllText($enOut, [Text.Encoding]::UTF8)

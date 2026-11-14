@@ -1,0 +1,23 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shell: [powershell, pwsh]
+    steps:
+      - uses: actions/checkout@v4
+      - name: 執行測試（${{ matrix.shell }}）
+        shell: ${{ matrix.shell }}
+        run: ./tests/run-tests.ps1
+      - name: 檢查 JSON 設定檔
+        shell: pwsh
+        run: |
+          Get-ChildItem -Recurse -Include *.json | ForEach-Object { Get-Content $_ -Raw | ConvertFrom-Json | Out-Null; "OK $($_.Name)" }

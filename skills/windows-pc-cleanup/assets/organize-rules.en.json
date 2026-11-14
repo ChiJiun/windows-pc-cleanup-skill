@@ -17,7 +17,7 @@
     { "name": "Installers", "extensions": ["exe", "msi", "msix", "appx", "appinstaller"] }
   ],
   "topics": [
-    { "name": "Personal IDs and Secrets", "pattern": "credential|recovery.?code|password|passwd|密碼|帳密|存摺|戶籍|身分證|身份證|護照|passport|學生證|健保卡|低收|bank.?statement|tax.?return|\\bssn\\b|\\.pfx$|\\.p12$|\\.pem$|\\.key$|\\.env$" },
+    { "name": "Personal IDs and Secrets", "pattern": "credential|recovery.?code|password|passwd|密碼|帳密|存摺|戶籍|身分證|身份證|護照|passport|學生證|健保卡|低收|bank.?statement|tax.?return|(^|[^a-z])ssn([^a-z]|$)|\\.pfx$|\\.p12$|\\.pem$|\\.key$|\\.env$" },
     { "name": "Certificates and Receipts", "pattern": "^cert|certificate|ecertificate|invoice|receipt|發票|收據|交易確認書|證照|證書" },
     { "name": "Applications and Jobs", "pattern": "碩士|博士|碩博|甄試|推甄|研究所|推薦函|推薦信|履歷|resume|\\bcv\\b|cover.?letter|自我介紹|面試|interview|實習|internship|成績單|成績證明|transcript|准考證|榜單|口試|offer" },
     { "name": "Scholarships and Admin", "pattern": "獎學金|助學金|scholarship|tuition|學雜費|抵免|輔系|雙主修|學程|選課|畢業|主計|課表|申請表|申請書|申請辦法|報名表|application.?form|請假|休學|公文" },

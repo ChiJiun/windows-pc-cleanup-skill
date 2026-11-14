@@ -12,10 +12,11 @@ param(
     [ValidateSet('yes', 'recycle-bin', 'undo-script', 'reinstall', 'no')][string]$Reversible = 'no',
     [string]$UndoHint = '',
     [string]$Evidence = '',
-    [string]$Note = ''
+    [string]$Note = '',
+    [ValidateSet('zh-TW', 'en')][string]$Lang
 )
 . "$PSScriptRoot\common.ps1"
 $SessionDir = Get-PccSessionDir $SessionDir
 Write-PccAction -SessionDir $SessionDir -Category $Category -Action $Action -Target $Target -Command $Command `
     -BytesFreed $BytesFreed -Result $Result -Reversible $Reversible -UndoHint $UndoHint -Evidence $Evidence -Note $Note
-"已記錄：[$Result] $Category / $Action"
+Msg "已記錄：[$Result] $Category / $Action" "Logged: [$Result] $Category / $Action"

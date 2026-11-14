@@ -1,33 +1,35 @@
-# 安全規則與確認關卡
+English | [繁體中文](zh-TW/safety-rules.md)
 
-## 一定要先問使用者的情況
+# Safety Rules and Confirmation Checkpoints
 
-| 動作 | 確認時要說清楚的內容 |
+## Always ask the user first
+
+| Action | What the confirmation must make clear |
 |---|---|
-| 刪除或清空任何檔案、資料夾 | 路徑、數量、大小、會不會自動重建、能不能還原 |
-| 永久刪除使用者資料（清空資源回收筒、刪虛擬機、不經資源回收筒刪除使用者檔案） | 單獨確認，明講「無法復原」 |
-| A 類暫存與快取的直接刪除（`clean-old-files.ps1` 未加 `-Recycle`、`clear-folder.ps1`） | 可以併在 A 類一起問，但必須明講「會直接刪除、不進資源回收筒」；沒講就不算同意 |
-| 解除安裝軟體 | 用哪個官方解除安裝程式、會不會一起刪掉程式內的資料（遊戲存檔、模擬器裡的 App） |
-| 結束程序 | 程序是誰啟動的、是否可能有人正在用；屬於其他 session 的預設不動 |
-| 修改設定（開機啟動、排程、登錄、電源計畫、服務） | 原本的值、改成什麼、怎麼改回來 |
-| 搬移使用者檔案 | 先給預覽清單；敏感檔另外點出 |
-| 需要系統管理員權限的動作 | 交給使用者自己做，附上步驟 |
+| Deleting or emptying any file or folder | Path, count, size, whether it rebuilds automatically, whether it can be undone |
+| Permanently deleting user data (emptying the Recycle Bin, deleting a VM, deleting user files without the Recycle Bin) | Confirm separately, and state plainly that it **cannot be undone** |
+| Direct deletion of Category A temp files and caches (`clean-old-files.ps1` without `-Recycle`, `clear-folder.ps1`) | May be asked together with the rest of Category A, but you must say explicitly that it is "deleted directly and does not go to the Recycle Bin"; if you did not say so, it does not count as approval |
+| Uninstalling software | Which official uninstaller will be used, and whether data inside the program goes with it (game saves, apps inside an emulator) |
+| Ending a process | Who started it and whether someone might be using it; processes belonging to other sessions are left alone by default |
+| Changing settings (startup, scheduled tasks, registry, power plan, services) | The original value, the new value, and how to change it back |
+| Moving user files | Show a preview list first; call out sensitive files separately |
+| Actions that need administrator rights | Hand them to the user to do, with steps |
 
-使用者的同意只適用於當次問的範圍。例如同意「A 類」不代表同意 B 類；同意刪 TEST1 虛擬機不代表同意刪其他虛擬機。
+Approval covers only what was asked at that moment. For example, approving "Category A" does not approve Category B, and approving deletion of the TEST1 VM does not approve deleting any other VM.
 
-## 絕對不要做
+## Never do
 
-- 不經確認就刪除、搬移、結束程序、改設定。
-- 刪除透過 junction 連到其他磁碟、而且還在使用中的資料（例如 `C:\Users\<user>\anaconda3` → `D:\...\anaconda3`）。
-- 直接刪除程式安裝資料夾來「解除安裝」。
-- 打開或讀取疑似含密碼、復原碼、證件、金融資料的檔案；把這類檔名或內容送到任何外部服務。
-- 嘗試繞過 UIPI、UAC 或其他權限限制（例如用腳本模擬點擊提高權限的視窗）。
-- 為了讓數字好看而報告預估值；只報實測值，估計值要標明。
-- 清理正在執行的 AI 工具、IDE、開發伺服器的暫存或程序。
+- Delete, move, end a process, or change a setting without confirmation.
+- Delete data that a junction points to on another drive and that is still in use (for example `C:\Users\<user>\anaconda3` → `D:\...\anaconda3`).
+- "Uninstall" a program by deleting its install folder.
+- Open or read files that look like they contain passwords, recovery codes, IDs, or financial data; or send such file names or contents to any external service.
+- Try to bypass UIPI, UAC, or any other permission boundary (for example by scripting clicks on an elevated window).
+- Report estimates to make the numbers look better; report only measured values, and label any estimate as such.
+- Clean temp data or processes of AI tools, IDEs, or dev servers that are currently running.
 
-## 試跑與紀錄
+## Dry runs and logging
 
-- 會改動檔案的腳本預設都是試跑，必須加 `-Apply`。
-- 每個實際動作都要出現在 `actions.jsonl`，包括被跳過與待決定的項目，報告才能完整。
-- 刪除舊檔、整理檔案時要留下逐檔明細（`clean-old-files-*.log`、`organize-log-*.csv`）。
-- 檔案整理的紀錄與還原腳本要另外放一份在整理目標底下，避免工作階段資料夾被清掉後無法還原。
+- Every script that changes files runs as a dry run by default; `-Apply` is required to act.
+- Every real action must appear in `actions.jsonl`, including skipped and pending items, so the report is complete.
+- Deleting old files and organizing files must leave a per-file record (`clean-old-files-*.log`, `organize-log-*.csv`).
+- A copy of the organize log and the undo script must also be kept inside the organized folder, so the changes can still be undone if the session folder is cleaned up.

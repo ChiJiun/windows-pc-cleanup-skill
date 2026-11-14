@@ -1,5 +1,5 @@
 ﻿# 唯讀：系統概況（硬體、磁碟、記憶體、記憶體占用前幾名的程式）。
-param([Parameter(Mandatory)][string]$SessionDir, [int]$Top = 15)
+param([Parameter(Mandatory)][string]$SessionDir, [int]$Top = 15, [ValidateSet('zh-TW', 'en')][string]$Lang)
 . "$PSScriptRoot\common.ps1"
 $SessionDir = Get-PccSessionDir $SessionDir
 
@@ -31,8 +31,8 @@ $overview = [ordered]@{
 }
 Save-PccJson $overview (Join-Path $SessionDir 'overview.json')
 
-"系統: $($overview.os)｜$($overview.model)｜$($overview.cpu)"
-"記憶體: 總共 $(Format-PccSize $overview.ramTotalBytes)，可用 $(Format-PccSize $overview.ramFreeBytes)，已認可 $(Format-PccSize $overview.commitUsedBytes) / $(Format-PccSize $overview.commitLimitBytes)"
-foreach ($d in $overview.drives) { "磁碟 {0} 可用 {1} / {2}" -f $d.Drive, (Format-PccSize $d.FreeBytes), (Format-PccSize $d.SizeBytes) }
-"記憶體占用前 $Top 名:"
+(Msg '系統' 'System') + ": $($overview.os) | $($overview.model) | $($overview.cpu)"
+Msg "記憶體: 總共 $(Format-PccSize $overview.ramTotalBytes)，可用 $(Format-PccSize $overview.ramFreeBytes)，已認可 $(Format-PccSize $overview.commitUsedBytes) / $(Format-PccSize $overview.commitLimitBytes)" "Memory: total $(Format-PccSize $overview.ramTotalBytes), free $(Format-PccSize $overview.ramFreeBytes), committed $(Format-PccSize $overview.commitUsedBytes) / $(Format-PccSize $overview.commitLimitBytes)"
+foreach ($d in $overview.drives) { (Msg "磁碟 {0} 可用 {1} / {2}" "Drive {0} free {1} / {2}") -f $d.Drive, (Format-PccSize $d.FreeBytes), (Format-PccSize $d.SizeBytes) }
+Msg "記憶體占用前 $Top 名:" "Top $Top processes by memory:"
 $procs | ForEach-Object { "  {0,-28} x{1,-4} {2}" -f $_.Name, $_.Count, (Format-PccSize $_.WorkingSetBytes) }

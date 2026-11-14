@@ -1,30 +1,32 @@
-# 清理位置目錄
+English | [繁體中文](zh-TW/cleanup-catalog.md)
 
-風險等級：**A** = 快取／暫存，刪除後會自動重建；**B** = 需要使用者判斷；**C** = 需要系統管理員或只能使用者自己做。
+# Cleanup Location Catalog
 
-| 位置 | 等級 | 建議方法 | 注意事項 |
+Risk levels: **A** = cache / temp, rebuilds automatically after deletion; **B** = needs the user's judgment; **C** = needs administrator rights or can only be done by the user.
+
+| Location | Level | Recommended method | Notes |
 |---|---|---|---|
-| `%TEMP%` 超過 7 天的檔案 | A | `clean-old-files.ps1 -OlderThanDays 7 -ExcludeTopLevel claude` | 排除仍在使用的工具暫存（例如 Claude Code 的 `Temp\claude`）；被占用的檔案會自動略過 |
-| `%TEMP%\claude` | B | 只刪已結束 session 的子資料夾 | 正在執行的 session 在這裡寫入；不確定就不要動。**永久刪除，要單獨確認並明講無法復原** |
-| 安裝程式暫存（例如 Visual Studio 安裝時的隨機資料夾） | B | 等安裝完成再清 | 修改時間是今天的通常代表還在用 |
-| Chrome / Edge 快取、Code Cache | A | 關閉瀏覽器後 `clear-folder.ps1` | 瀏覽器執行中就跳過 |
-| 新版 Teams 快取 `Packages\MSTeams_8wekyb3d8bbwe\LocalCache\Microsoft\MSTeams` | A | 關閉 Teams 後 `clear-folder.ps1` | 微軟官方建議的重設方式；可能需要重新登入 |
-| VS Code `Cache`、`CachedData` | A | 關閉 VS Code 後清 | `workspaceStorage` 存有工作區狀態，不建議清 |
-| Hugging Face `~/.cache/huggingface` | A | `clear-folder.ps1` | 之後用到模型會重新下載，可能很大 |
-| conda `pkgs` | A | `conda clean --all -y` | **套件常以硬連結與環境共用**，資料夾大小會高估實際釋放量；以前後磁碟空間實測為準 |
-| conda 舊環境 | B | `conda env remove -n <名稱>` | 列出各環境大小與最後修改日期讓使用者選。**永久刪除，要單獨確認**；建議先 `conda env export -n <名稱> > <名稱>.yml` 留下重建用的清單 |
-| npm / pip / uv / pnpm / yarn 快取 | A | 官方指令（見 SKILL.md） | 先用 `npm config get cache`、`pip cache dir`、`uv cache dir` 找實際位置，可能被設定到其他磁碟 |
-| Docker | A/B | `docker builder prune -f`（A）；`docker image prune -a`（B，永久刪除未使用的映像，要單獨確認；需要時得重新 pull 或 build） | 清完 `docker_data.vhdx` 檔案大小不會馬上變小，要在 Docker Desktop 內或用 `Optimize-VHD`（需系統管理員）壓縮 |
-| WSL 虛擬硬碟 `ext4.vhdx` | C | `wsl --shutdown` 後用 `Optimize-VHD` 或 diskpart 壓縮 | 先用 `wsl -- df -h /` 比較內部用量與 vhdx 大小，差距小就不值得做 |
-| VirtualBox 虛擬機 | B | `VBoxManage unregistervm <名稱> --delete` | 永久刪除。先用 `showvminfo` 看作業系統、最後使用時間、共享資料夾，協助使用者回想用途 |
-| Android 模擬器（BlueStacks、LDPlayer 等） | B | 官方解除安裝程式 | 模擬器內的 App 與資料會一起刪除；BlueStacks 另有 BlueStacks Services 要分開移除 |
-| 遊戲 | B | 從啟動器（Steam、Battle.net、Riot Client）或登錄的 `UninstallString` 移除 | 移除 VALORANT 後，Riot Vanguard 反作弊驅動仍在，要另外詢問 |
-| Downloads 安裝檔、重複檔、已解壓縮的壓縮檔 | B | `organize-plan.ps1` → 確認 → `organize-apply.ps1` | 送資源回收筒；VPN、憑證類安裝檔預設保留 |
-| 資源回收筒 | B | `Clear-RecycleBin -Force` | 永久刪除，單獨確認 |
-| Windows Update 快取、`C:\Windows\Temp` | C | 設定 > 系統 > 儲存空間 > 暫存檔案 | 需要系統管理員 |
+| Files in `%TEMP%` older than 7 days | A | `clean-old-files.ps1 -OlderThanDays 7 -ExcludeTopLevel claude` | Exclude temp folders of tools still in use (e.g. Claude Code's `Temp\claude`); locked files are skipped automatically |
+| `%TEMP%\claude` | B | Delete only subfolders of sessions that have ended | Running sessions write here; if unsure, leave it alone. **Permanent deletion: confirm separately and state that it cannot be undone** |
+| Installer temp folders (e.g. random folders created by the Visual Studio installer) | B | Clean after the installation finishes | A modification time of today usually means it is still in use |
+| Chrome / Edge cache, Code Cache | A | `clear-folder.ps1` after closing the browser | Skip if the browser is running |
+| New Teams cache `Packages\MSTeams_8wekyb3d8bbwe\LocalCache\Microsoft\MSTeams` | A | `clear-folder.ps1` after closing Teams | The reset method Microsoft recommends; the user may need to sign in again |
+| VS Code `Cache`, `CachedData` | A | Clean after closing VS Code | `workspaceStorage` holds workspace state; cleaning it is not recommended |
+| Hugging Face `~/.cache/huggingface` | A | `clear-folder.ps1` | Models will be re-downloaded when needed, which can be large |
+| conda `pkgs` | A | `conda clean --all -y` | **Packages are often shared with environments via hard links**, so the folder size overstates what will be freed; go by the measured disk space before and after |
+| Old conda environments | B | `conda env remove -n <name>` | List each environment's size and last modified date and let the user choose. **Permanent deletion: confirm separately**; suggest `conda env export -n <name> > <name>.yml` first to keep a list for rebuilding |
+| npm / pip / uv / pnpm / yarn caches | A | Official commands (see [SKILL.md](../SKILL.md)) | Find the actual location first with `npm config get cache`, `pip cache dir`, `uv cache dir`; it may be configured on another drive |
+| Docker | A/B | `docker builder prune -f` (A); `docker image prune -a` (B: permanently deletes unused images, confirm separately; they must be pulled or rebuilt when needed) | `docker_data.vhdx` does not shrink right away; compact it in Docker Desktop or with `Optimize-VHD` (needs admin) |
+| WSL virtual disk `ext4.vhdx` | C | After `wsl --shutdown`, compact with `Optimize-VHD` or diskpart | Compare internal usage from `wsl -- df -h /` with the vhdx size first; if the gap is small, it is not worth it |
+| VirtualBox VMs | B | `VBoxManage unregistervm <name> --delete` | Permanent deletion. Use `showvminfo` first to check the OS, last use, and shared folders, to help the user remember what it was for |
+| Android emulators (BlueStacks, LDPlayer, etc.) | B | Official uninstaller | Apps and data inside the emulator are deleted too; BlueStacks also has BlueStacks Services, which must be removed separately |
+| Games | B | Remove via the launcher (Steam, Battle.net, Riot Client) or the registered `UninstallString` | After removing VALORANT, the Riot Vanguard anti-cheat driver is still installed; ask about it separately |
+| Installers, duplicates, and already-extracted archives in Downloads | B | `organize-plan.ps1` → confirm → `organize-apply.ps1` | Sent to the Recycle Bin; VPN and certificate installers are kept by default |
+| Recycle Bin | B | `Clear-RecycleBin -Force` | Permanent deletion; confirm separately |
+| Windows Update cache, `C:\Windows\Temp` | C | Settings > System > Storage > Temporary files | Needs administrator rights |
 
-## 已知陷阱
+## Known pitfalls
 
-- **Junction／符號連結**：使用者常把大資料夾搬到 D 槽，在 C 槽留下 junction。從 C 槽路徑量到的大小其實在 D 槽，清掉釋放的也是 D 槽。`scan-cleanup-targets.ps1` 會標出實際位置，`Get-PccDirStats` 不會跟隨子層 junction。
-- **最後存取時間不可靠**：掃描本身會更新資料夾的存取時間，不能用來判斷「最近有沒有在用」。改看檔案的最後修改時間、程式設定檔或使用紀錄。
-- **同時寫入抵銷**：清理期間其他程式（AI 工具、下載、編譯）持續寫入時，磁碟可用空間的差值會小於實際清掉的量。報告時要說明。
+- **Junctions / symbolic links**: users often move large folders to drive D and leave a junction on drive C. The size measured through the C: path is actually on D:, and cleaning it frees space on D:. `scan-cleanup-targets.ps1` flags the actual location, and `Get-PccDirStats` does not follow junctions in subfolders.
+- **Last access time is unreliable**: scanning itself updates folder access times, so it cannot tell you whether something was used recently. Look at file modification times, program config files, or usage history instead.
+- **Concurrent writes offset the gain**: if other programs (AI tools, downloads, builds) keep writing during cleanup, the change in free space will be smaller than what was actually removed. Mention this when reporting.

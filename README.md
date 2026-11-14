@@ -1,80 +1,95 @@
+English | [繁體中文](README.zh-TW.md)
+
 # windows-pc-cleanup-skill
 
-給 Claude Code 使用的 Windows 電腦清理與健康檢查 skill。它會先完整掃描、分級列出建議，**每一個會改動電腦的步驟都先徵求你的確認**，所有動作都有紀錄可以溯源、可以還原，最後產生一份 HTML 總整報告。
+A Claude Code skill for cleaning up and health-checking a Windows PC. It runs a full read-only scan first and presents tiered recommendations, **asks for your confirmation before every step that changes your computer**, logs every action so it can be traced and undone, and finishes with a self-contained HTML report.
 
-*A Claude Code skill for safely cleaning up and health-checking a Windows PC: read-only scan first, tiered recommendations, explicit confirmation before every change, full action log with undo paths, and a self-contained HTML report. Docs are in Traditional Chinese.*
+Docs and script output are available in English and Traditional Chinese (see [Language](#language)).
 
-## 功能
+## Features
 
-| 階段 | 內容 |
+| Stage | What it does |
 |---|---|
-| 掃描（唯讀） | 磁碟與記憶體概況、暫存／快取（會辨識 junction 實際所在磁碟、程式是否使用中）、大型檔案、開機啟動項與排程 |
-| 分級建議 | A 類低風險快取、B 類要你判斷（虛擬機、模擬器、遊戲、舊環境）、C 類需系統管理員或只能你自己做 |
-| 清理 | 試跑 → 確認 → 執行；能進資源回收筒就不永久刪除；用官方指令與官方解除安裝程式 |
-| 檔案整理 | 依類型＋主題產生預覽、敏感檔集中並提醒、重複檔以 SHA256 判斷；附還原腳本 |
-| 健康檢查 | CPU 拆解到程式層級、記憶體、SSD 健康、電池健康度、裝置、Defender、非預期關機、藍色畫面、Windows Update 錯誤碼解讀、重複啟動的殘留程序；可搭配 computer use 檢視工作管理員 |
-| HTML 總整報告 | 清理前後磁碟空間、每個動作的指令／實測釋放量／還原方式、健檢發現、整理統計、所有紀錄檔的 SHA256 |
+| Scan (read-only) | Disk and memory overview; temp files and caches (detects which drive a junction really points to, and whether a program is using it); large files; startup items and scheduled tasks |
+| Tiered recommendations | Category A: low-risk caches. Category B: your call (VMs, emulators, games, old environments). Category C: needs admin rights or only you can do it |
+| Cleanup | Dry run → confirm → apply. Uses the Recycle Bin instead of permanent deletion whenever possible. Uses official commands and official uninstallers |
+| File organization | Previews a by-type + by-topic layout, gathers sensitive files in one place and flags them, detects duplicates by SHA256; comes with an undo script |
+| Health check | CPU broken down by program, memory, SSD health, battery wear, devices, Defender, unexpected shutdowns, blue screens, Windows Update error codes explained, duplicated leftover processes; can use computer use to look at Task Manager |
+| HTML report | Disk space before and after, the command / measured space freed / undo method for every action, health findings, organization stats, and SHA256 of every log file |
 
-## 安裝
+## Installation
 
-**方法一：Claude Code plugin marketplace**
+**Option 1: Claude Code plugin marketplace**
 
 ```
 /plugin marketplace add ChiJiun/windows-pc-cleanup-skill
 /plugin install windows-pc-cleanup@windows-pc-cleanup-skill
 ```
 
-**方法二：手動複製**
+**Option 2: Copy manually**
 
-把 `skills/windows-pc-cleanup` 整個資料夾複製到 `%USERPROFILE%\.claude\skills\`。
+Copy the whole `skills/windows-pc-cleanup` folder into `%USERPROFILE%\.claude\skills\`.
 
-## 使用
+## Usage
 
-在 Claude Code 中直接說，例如：
+Just ask in Claude Code, for example:
 
-- 「幫我清理電腦，釋放磁碟空間，動工前先跟我確認」
-- 「整理我的下載資料夾」
-- 「檢查電腦健康，看工作管理員有沒有異常」
+- "Clean up my PC and free some disk space. Check with me before changing anything."
+- "Organize my Downloads folder."
+- "Check my PC's health and see if anything in Task Manager looks wrong."
 
-也可以單獨執行腳本（都在 `skills/windows-pc-cleanup/scripts/`）：
+Requests in Chinese work too, e.g. 「幫我清理電腦」「整理我的下載資料夾」「檢查電腦健康」.
+
+You can also run the scripts on their own (all in `skills/windows-pc-cleanup/scripts/`):
 
 ```powershell
-$S = powershell -ExecutionPolicy Bypass -File scripts\new-session.ps1
+$S = powershell -ExecutionPolicy Bypass -File scripts\new-session.ps1 -Lang en
 powershell -ExecutionPolicy Bypass -File scripts\scan-cleanup-targets.ps1 -SessionDir $S
 powershell -ExecutionPolicy Bypass -File scripts\health-check.ps1 -SessionDir $S
 powershell -ExecutionPolicy Bypass -File scripts\build-report.ps1 -SessionDir $S
 ```
 
-會改動檔案的腳本（`clean-old-files.ps1`、`clear-folder.ps1`、`organize-apply.ps1`、`organize-undo.ps1`）**不加 `-Apply` 只會試跑**。
+Scripts that change files (`clean-old-files.ps1`, `clear-folder.ps1`, `organize-apply.ps1`, `organize-undo.ps1`) **only do a dry run unless you add `-Apply`**.
 
-## 溯源與還原
+## Language
 
-- 每個工作階段的資料都在 `%USERPROFILE%\PCCleanup\<時間>\`。
-- `actions.jsonl`：每個動作一行，記錄時間、指令、對象、實測釋放量、結果、還原方式。
-- `clean-old-files-*.log`、`organize-plan-*.csv`、`organize-log-*.csv`：逐檔明細。
-- 檔案整理另外在整理目標底下留一份 `_整理紀錄`（含 `organize-undo.ps1`），工作階段資料夾被刪也能還原。
-- `report.html` 列出所有紀錄檔的 SHA256，可以用來確認紀錄沒有被改過。
+- Claude replies in your language and passes the matching `-Lang` to `new-session.ps1` when it creates the session; later scripts in the same session pick it up automatically.
+- Every script accepts `-Lang zh-TW` or `-Lang en`, which sets the language of its output messages and of the HTML report. Without `-Lang`, the language is resolved in this order:
+  1. the `PCC_LANG` environment variable (e.g. `$env:PCC_LANG = 'en'`)
+  2. the language recorded in the session's `baseline.json` (written by `new-session.ps1 -Lang`)
+  3. the system UI language (`zh*` uses `zh-TW`, anything else uses `en`)
+- There are two sets of file organization rules: `assets/organize-rules.default.json` (Chinese folder names such as 文件, 圖片) and `assets/organize-rules.en.json` (English folder names such as Documents, Images). If you do not pass `-RulesFile`, the one matching the language is used.
+- The skill's main instructions are the English [SKILL.md](skills/windows-pc-cleanup/SKILL.md), with a Traditional Chinese counterpart in [SKILL.zh-TW.md](skills/windows-pc-cleanup/SKILL.zh-TW.md). Reference docs are in [`references/`](skills/windows-pc-cleanup/references/) (English) and [`references/zh-TW/`](skills/windows-pc-cleanup/references/zh-TW/) (Traditional Chinese).
 
-> 報告與紀錄含本機路徑和檔名，分享前請先檢查。
+## Traceability and undo
 
-## 需求
+- Each session's data is stored in `%USERPROFILE%\PCCleanup\<timestamp>\`.
+- `actions.jsonl`: one line per action, recording the time, command, target, measured space freed, result, and how to undo it.
+- `clean-old-files-*.log`, `organize-plan-*.csv`, `organize-log-*.csv`: per-file details.
+- File organization also leaves a log folder inside the organized folder (including `organize-undo.ps1`; the folder name comes from `logFolder` in the rules file, `_整理紀錄` in the Chinese rules, `_organize-logs` in the English rules), so changes can be undone even if the session folder is deleted.
+- In the organize log CSV, items sent to the Recycle Bin are marked `(RecycleBin)` in the `Final` column, regardless of language. `organize-undo.ps1` still reads the legacy `(資源回收筒)` marker in older logs.
+- `report.html` lists the SHA256 of every log file, so you can verify the logs have not been altered.
+
+> Reports and logs contain local paths and file names. Review them before sharing.
+
+## Requirements
 
 - Windows 10 / 11
-- Windows PowerShell 5.1 或 PowerShell 7
-- 大部分功能不需要系統管理員權限
+- Windows PowerShell 5.1 or PowerShell 7
+- Most features do not need administrator rights
 
-## 開發
+## Development
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File tests\run-tests.ps1
 ```
 
-測試只在暫存資料夾中進行，不會動到你的檔案。腳本必須存成 **UTF-8 with BOM**（測試會檢查）。
+Tests run only inside a temp folder and never touch your files. Scripts must be saved as **UTF-8 with BOM** (the tests check this).
 
-## 參考
+## Prior art
 
-設計時參考了 BleachBit、WinDirStat、FluentCleaner、sifty 與幾個 macOS 清理 skill，詳見 [prior-art.md](skills/windows-pc-cleanup/references/prior-art.md)。
+The design draws on BleachBit, WinDirStat, FluentCleaner, sifty, and a few macOS cleaner skills. See [prior-art.md](skills/windows-pc-cleanup/references/prior-art.md).
 
-## 授權
+## License
 
 MIT

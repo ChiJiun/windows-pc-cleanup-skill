@@ -1,8 +1,17 @@
 {
   "name": "windows-pc-cleanup",
-  "version": "0.1.1",
-  "description": "Windows 電腦掃描、分級清理、檔案整理與軟硬體健康檢查；每一步動工前都先確認，最後產生可溯源的 HTML 報告。",
-  "author": { "name": "ChiJiun" },
+  "version": "0.2.0",
+  "description": "Scan, tiered cleanup, file organization, and hardware/software health check for Windows. Confirms before every change and ends with a traceable HTML report. English and Traditional Chinese (Windows 電腦清理與健康檢查，中英雙語).",
+  "author": {
+    "name": "ChiJiun"
+  },
   "license": "MIT",
-  "keywords": ["windows", "cleanup", "disk", "health-check", "powershell"]
+  "keywords": [
+    "windows",
+    "cleanup",
+    "disk",
+    "health-check",
+    "powershell",
+    "i18n"
+  ]
 }

@@ -1,129 +1,142 @@
 ---
 name: windows-pc-cleanup
-description: 在 Windows 電腦上做完整掃描、分級清理、檔案整理與軟硬體健康檢查，最後產生可溯源的 HTML 總整報告。每一個會改動電腦的步驟都要先取得使用者確認，並留下可還原的紀錄。當使用者說「清理電腦」「釋放磁碟空間」「電腦變慢」「記憶體不夠」「整理下載資料夾／桌面」「檢查電腦健康」「看工作管理員有沒有異常」，或要求 Windows 版的 disk cleanup / PC cleaner 時使用。不適用於 macOS、Linux 或伺服器。
+description: Full scan, tiered cleanup, file organization, and hardware/software health check for a Windows PC, ending with a traceable HTML report. Every step that changes the computer requires the user's explicit confirmation first and leaves a log with a way to undo it. Use when the user wants to clean up the PC, free disk space, says the PC is slow or low on memory, wants to organize the Downloads folder or desktop, check PC health, or see whether anything looks abnormal in Task Manager, or asks for a Windows disk cleanup / PC cleaner. Also use for Chinese requests such as 「清理電腦」「釋放磁碟空間」「電腦變慢」「記憶體不夠」「整理下載資料夾／桌面」「檢查電腦健康」「看工作管理員有沒有異常」. Not for macOS, Linux, or servers.
 ---
 
-# Windows 電腦清理與健康檢查
+English | [繁體中文](SKILL.zh-TW.md)
 
-目標：讓電腦回到乾淨、順暢的狀態，同時**不弄壞任何東西、不刪掉使用者還要的資料**，而且事後能說清楚做了什麼、怎麼還原。
+# Windows PC Cleanup and Health Check
 
-## 最高原則（每一步都適用）
+Goal: get the PC back to a clean, responsive state **without breaking anything or deleting data the user still wants**, and be able to explain afterwards exactly what was done and how to undo it.
 
-1. **先看、後問、再動。** 掃描一律唯讀。任何刪除、搬移、解除安裝、結束程序、改設定之前，都要先把「要做什麼、影響多大、能不能還原」講清楚，等使用者明確同意。前一輪的同意不能延伸到下一批。
-2. **預設試跑。** `clean-old-files.ps1`、`clear-folder.ps1`、`organize-apply.ps1`、`organize-undo.ps1` 不加 `-Apply` 只會列出結果。先跑一次試跑，把數字給使用者看，同意後才加 `-Apply`。
-3. **能進資源回收筒就不要永久刪除。** 永久刪除使用者資料（清空資源回收筒、刪虛擬機、`unregistervm --delete`、不經資源回收筒刪除使用者檔案）要另外單獨確認，並明講「無法復原」。
-   - **唯一的例外是 A 類的暫存與快取**（Temp 舊檔、應用程式快取、套件管理器快取）：它們會自動重建、沒有還原價值，送資源回收筒只會拖慢速度又占空間，所以 `clean-old-files.ps1`（未加 `-Recycle`）和 `clear-folder.ps1` 會直接刪除。詢問 A 類時必須明講「這些會直接刪除、不進資源回收筒」，使用者同意 A 類即視為同意這一點；沒講就不算同意。
-   - 送資源回收筒的腳本會先檢查放不放得下（網路或卸除式磁碟、資源回收筒被停用、項目大於上限時，Windows 會不經詢問直接永久刪除）。放不下的項目會保留原檔並記為失敗，這時要回報使用者，改用隔離資料夾或另外詢問。
-4. **每個動作都要記錄。** 用本 skill 腳本做的動作會自動寫進 `actions.jsonl`；用其他指令做的（`conda clean`、`docker builder prune`、官方解除安裝程式、手動刪虛擬機），要立刻用 `log-action.ps1` 補記，釋放量用前後 `measure-free.ps1` 的實測差值。使用者決定「不做」或「之後再說」的項目，也用 `-Result skipped` / `pending` 記下來。
-5. **數字要誠實。** 估計值和實測值分開說。實測比預期少時要找原因並更正之前的說法（常見原因：硬連結重複計算、junction 讓空間其實在別的磁碟、同時有其他程式在寫入）。
-6. **不碰不屬於這次任務的東西。** 其他 AI session、開發伺服器、使用者正在用的程式，就算看起來是殘留，也只回報、不結束，除非使用者明確指示。
-7. **敏感檔只看檔名。** 密碼、復原碼、證件、存摺這類檔案不要打開，不要把內容或檔名送到外部服務；只提醒使用者改存到密碼管理器或安全位置。`organize-plan.ps1` 只會印出敏感檔的數量和去處，不印檔名；需要確認時請使用者自己打開計畫 CSV 查看。
+## Core principles (apply to every step)
 
-詳細規則見 [references/safety-rules.md](references/safety-rules.md)。
+1. **Look, then ask, then act.** Scans are always read-only. Before any delete, move, uninstall, process kill, or settings change, explain what will be done, how big the impact is, and whether it can be undone, then wait for the user's explicit approval. Approval for one batch never carries over to the next.
+2. **Dry run by default.** `clean-old-files.ps1`, `clear-folder.ps1`, `organize-apply.ps1`, and `organize-undo.ps1` only list what they would do unless you pass `-Apply`. Run a dry run first, show the user the numbers, and add `-Apply` only after they agree.
+3. **If it can go to the Recycle Bin, do not delete it permanently.** Permanently deleting user data (emptying the Recycle Bin, deleting a VM, `unregistervm --delete`, deleting user files without going through the Recycle Bin) requires its own separate confirmation, and you must state plainly that it **cannot be undone**.
+   - **The only exception is Category A temp files and caches** (old Temp files, application caches, package manager caches). They rebuild automatically and have no recovery value; sending them to the Recycle Bin only slows things down and wastes space. So `clean-old-files.ps1` (without `-Recycle`) and `clear-folder.ps1` delete them directly. When asking about Category A, you must say explicitly that "these are deleted directly and do not go to the Recycle Bin." Approving Category A counts as approving this only if you said it; if you did not, it does not count.
+   - Scripts that send items to the Recycle Bin check first whether the item will actually fit (on network or removable drives, when the Recycle Bin is disabled, or when an item exceeds its size limit, Windows silently deletes it permanently). Items that will not fit are left in place and logged as failed. Report this to the user, and either use a quarantine folder or ask them again.
+4. **Log every action.** Actions done with this skill's scripts are written to `actions.jsonl` automatically. Anything done with other commands (`conda clean`, `docker builder prune`, an official uninstaller, deleting a VM by hand) must be logged right away with `log-action.ps1`, using the measured difference from `measure-free.ps1` before and after as the space freed. Items the user decides not to do, or to do later, are also logged with `-Result skipped` / `pending`.
+5. **Be honest with numbers.** Keep estimates and measured values separate. If the measured result is smaller than expected, find out why and correct what you said earlier (common causes: hard links counted twice, a junction meaning the space is actually on another drive, other programs writing at the same time).
+6. **Do not touch anything outside this task.** Other AI sessions, dev servers, and programs the user is running are only reported, never terminated, even if they look like leftovers, unless the user explicitly says so.
+7. **For sensitive files, look at file names only.** Never open files such as passwords, recovery codes, IDs, or bank statements, and never send their contents or names to an external service. Just remind the user to move them to a password manager or another safe place. `organize-plan.ps1` prints only the number of sensitive files and where they go, never their names; if they need checking, ask the user to open the plan CSV themselves.
 
-## 執行環境
+See [references/safety-rules.md](references/safety-rules.md) for the detailed rules.
 
-- 腳本在本檔所在資料夾底下的 `scripts/`，相容 Windows PowerShell 5.1 與 PowerShell 7。用 `powershell -ExecutionPolicy Bypass -File <腳本> ...` 執行。下面範例中的 `scripts/...` 都是相對於本 skill 資料夾；目前目錄不同時請改用完整路徑（例如 `%USERPROFILE%\.claude\skills\windows-pc-cleanup\scripts\...` 或 plugin 安裝的位置）。
-- 腳本檔是 **UTF-8 with BOM**（5.1 沒有 BOM 會把中文讀成亂碼）。修改後要保留 BOM。
-- 大多數掃描不需要系統管理員權限。需要權限的項目（Windows Update 快取、系統 Temp、`Optimize-VHD`）就列為「請使用者自己做」，並附上步驟。
-- 常見的 PowerShell 陷阱見 [references/powershell-pitfalls.md](references/powershell-pitfalls.md)。
+## Environment
 
-## 流程
+- The scripts live in `scripts/` next to this file and work with both Windows PowerShell 5.1 and PowerShell 7. Run them with `powershell -ExecutionPolicy Bypass -File <script> ...`. The `scripts/...` paths in the examples below are relative to this skill's folder; if the current directory is different, use the full path (for example `%USERPROFILE%\.claude\skills\windows-pc-cleanup\scripts\...`, or wherever the plugin is installed).
+- The scripts are saved as **UTF-8 with BOM** (without a BOM, 5.1 misreads the non-ASCII text in them). Keep the BOM when editing.
+- Most scans do not need administrator rights. Items that do (Windows Update cache, system Temp, `Optimize-VHD`) are listed as "for the user to do", with steps.
+- Common PowerShell pitfalls are in [references/powershell-pitfalls.md](references/powershell-pitfalls.md).
 
-### 0. 建立工作階段
+### Language
+
+- **Reply in the user's language.** When creating the session, pass the matching `-Lang` to `new-session.ps1` (`zh-TW` if the user writes in Chinese, `en` otherwise). It is recorded in `baseline.json`, and every later script in the same session uses it automatically.
+- Every script accepts `-Lang zh-TW` or `-Lang en`, which sets the language of its output messages and of the HTML report. Without `-Lang`, the language is resolved in this order:
+  1. the `PCC_LANG` environment variable
+  2. the language recorded in the session's `baseline.json` (written by `new-session.ps1 -Lang`)
+  3. the system UI language (`zh*` uses `zh-TW`, anything else uses `en`)
+- Note that `PCC_LANG` takes precedence over the session's recorded language. If `PCC_LANG` is set and differs from the user's language, pass `-Lang` explicitly to every script.
+- File organization rules follow the same language when no `-RulesFile` is given: `assets/organize-rules.default.json` uses Chinese folder names (such as 文件, 圖片), and `assets/organize-rules.en.json` uses English folder names (such as Documents, Images).
+
+## Workflow
+
+### 0. Create a session
 
 ```powershell
-$S = powershell -ExecutionPolicy Bypass -File scripts/new-session.ps1   # 印出工作階段資料夾路徑
+$S = powershell -ExecutionPolicy Bypass -File scripts/new-session.ps1 -Lang en   # prints the session folder path; use -Lang zh-TW for Chinese-speaking users
 ```
 
-之後所有腳本都要帶 `-SessionDir $S`。`baseline.json` 會記下開始時的磁碟空間，報告用它比較前後差異。
+Pass `-SessionDir $S` to every script after this. `baseline.json` records the starting disk space and the session language; the report uses it to compare before and after.
 
-### 1. 唯讀掃描
+### 1. Read-only scan
 
-依序（可平行）執行：
+Run these in order (they can run in parallel):
 
-| 腳本 | 內容 | 備註 |
+| Script | What it covers | Notes |
 |---|---|---|
-| `scan-overview.ps1` | 硬體、磁碟、記憶體、記憶體占用前幾名 | 數秒 |
-| `scan-cleanup-targets.ps1` | 暫存、快取、資源回收筒、Docker、使用者資料夾的 junction | 會標出實際所在磁碟與「程式使用中」 |
-| `scan-startup.ps1` | 開機啟動項目（含是否已停用）、登入時執行的排程工作 | |
-| `scan-large-items.ps1` | 大型檔案、磁碟根目錄資料夾大小 | **可能超過 10 分鐘，放背景執行** |
-| `health-check.ps1` | CPU 拆解、記憶體、磁碟健康、電池、裝置、Defender、事件紀錄、Windows Update 錯誤、重複／殘留程序 | 見第 5 步 |
+| `scan-overview.ps1` | Hardware, disks, memory, top memory consumers | A few seconds |
+| `scan-cleanup-targets.ps1` | Temp, caches, Recycle Bin, Docker, junctions under the user folder | Flags the actual drive and whether a program is using it |
+| `scan-startup.ps1` | Startup items (including whether they are disabled), scheduled tasks that run at logon | |
+| `scan-large-items.ps1` | Large files, folder sizes at the drive root | **Can take over 10 minutes; run it in the background** |
+| `health-check.ps1` | CPU breakdown, memory, disk health, battery, devices, Defender, event logs, Windows Update errors, duplicate / leftover processes | See step 5 |
 
-掃描期間不要對使用者說「可以清 X GB」，等全部結果出來、去掉重複計算後再說。
+Do not tell the user "you can free X GB" while scans are still running. Wait until all results are in and double counting has been removed.
 
-### 2. 分級報告，請使用者決定
+### 2. Tiered report; let the user decide
 
-把結果分成三級，用表格呈現（項目、大小、實際位置、怎麼清、能不能還原）：
+Group the results into three categories and present them as a table (item, size, actual location, how to clean, whether it can be undone):
 
-- **A 類（低風險）**：快取與暫存，刪了會自動重建。例如超過 7 天的 Temp 檔、瀏覽器／Teams／VS Code 快取（程式要先關）、套件管理器快取（用官方指令）、當機傾印。
-- **B 類（要使用者判斷）**：舊的 conda 環境、虛擬機、模擬器、遊戲、Downloads 裡的安裝檔與重複檔、AI 工具的舊 session 暫存。對每一項提供判斷依據（最後使用時間、用途推測、設定檔內容），不要只丟一個大小。
-- **C 類（只能使用者自己做或需要權限）**：系統 Temp、Windows Update 快取、虛擬硬碟壓縮、換電池、更新驅動。
+- **Category A (low risk)**: caches and temp files that rebuild automatically when deleted. For example: Temp files older than 7 days, browser / Teams / VS Code caches (close the program first), package manager caches (use the official commands), crash dumps.
+- **Category B (user's judgment)**: old conda environments, virtual machines, emulators, games, installers and duplicates in Downloads, old session temp data from AI tools. For each item, give the user something to decide with (last used, likely purpose, what the config files say), not just a size.
+- **Category C (user must do it, or needs admin rights)**: system Temp, Windows Update cache, compacting virtual disks, replacing the battery, updating drivers.
 
-用 `AskUserQuestion`（可多選）讓使用者勾選。使用者問「這是什麼」時，先唯讀調查再回答，不要猜。
+Use `AskUserQuestion` (multi-select) to let the user pick. When the user asks "what is this?", investigate read-only before answering; do not guess.
 
-各位置的清理方式與注意事項見 [references/cleanup-catalog.md](references/cleanup-catalog.md)。
+See [references/cleanup-catalog.md](references/cleanup-catalog.md) for how to clean each location and what to watch out for.
 
-### 3. 執行使用者同意的項目
+### 3. Carry out the approved items
 
-- 每個項目執行前，再確認一次相關程式沒有在執行；執行中就跳過並記錄 `skipped`。
-- Temp：`clean-old-files.ps1 -Path $env:TEMP -OlderThanDays 7 -ExcludeTopLevel claude -Apply`（先不加 `-Apply` 試跑）。會直接刪除、不進資源回收筒（見最高原則第 3 條的例外）。
-- 快取資料夾：`clear-folder.ps1 -Path <路徑> -ProcessNames <程式> -Apply`。同樣直接刪除。
-- 套件管理器：`conda clean --all -y`、`npm cache clean --force`、`pip cache purge`、`uv cache clean`、`pnpm store prune`、`docker builder prune -f`。執行前後各跑一次 `measure-free.ps1`，再用 `log-action.ps1` 記錄實測差值。
-- 軟體：一律用官方解除安裝程式（登錄檔的 `UninstallString`），不要直接刪程式資料夾。GUI 解除安裝程式要請使用者自己點完；完成後再檢查殘留（程式資料夾、`AppData`、開始功能表捷徑、開機啟動項），殘留的清除也要記錄。
-- 虛擬機：先用 `VBoxManage showvminfo` 確認是關機狀態，再 `VBoxManage unregistervm <名稱> --delete`。這是永久刪除。
-- 資源回收筒：只有使用者明確同意「永久刪除」才清空。
+- Right before each item, check again that the related program is not running. If it is, skip the item and log it as `skipped`.
+- Temp: `clean-old-files.ps1 -Path $env:TEMP -OlderThanDays 7 -ExcludeTopLevel claude -Apply` (dry run first, without `-Apply`). Files are deleted directly, not sent to the Recycle Bin (see the exception in core principle 3).
+- Cache folders: `clear-folder.ps1 -Path <path> -ProcessNames <program> -Apply`. Also deleted directly.
+- Package managers: `conda clean --all -y`, `npm cache clean --force`, `pip cache purge`, `uv cache clean`, `pnpm store prune`, `docker builder prune -f`. Run `measure-free.ps1` before and after, then log the measured difference with `log-action.ps1`.
+- Software: always use the official uninstaller (the `UninstallString` in the registry); never just delete the program folder. Ask the user to click through GUI uninstallers themselves. Afterwards, check for leftovers (program folder, `AppData`, Start menu shortcuts, startup items) and log any cleanup of them too.
+- Virtual machines: confirm the VM is powered off with `VBoxManage showvminfo`, then run `VBoxManage unregistervm <name> --delete`. This is a permanent deletion.
+- Recycle Bin: empty it only if the user has explicitly agreed to **permanent deletion**.
 
-### 4. 檔案整理（例如 Downloads）
+### 4. File organization (e.g. Downloads)
 
-1. `organize-plan.ps1 -Root <資料夾>` 產生計畫 CSV（不搬任何東西）。規則在 `assets/organize-rules.default.json`，可複製一份修改後用 `-RulesFile` 指定。
-   - 腳本會拒絕整理磁碟根目錄、使用者資料夾本身或上層、系統與程式資料夾、預設使用者設定檔、`.ssh`／`.gnupg`、`AppData`（只允許 Temp 底下的子資料夾），因為子資料夾會被整批搬走。判斷用的是最終實際位置（經過 junction、symlink、短檔名、本機系統管理共用之後），解析不出實際位置也會拒絕。只有使用者明確要求、而且了解風險時才加 `-AllowUnsafeRoot`。
-2. 先跟使用者確認整理方式（依類型、類型＋主題、類型＋年份），以及安裝檔、重複檔、已解壓縮的壓縮檔、子資料夾各要怎麼處理。
-3. 把預覽給使用者看：各資料夾數量、每個主題分到哪些檔案、要移除哪些檔案和原因。分錯的就調整規則重產計畫。**敏感檔要特別點出來。**
-4. 使用者同意後才執行 `organize-apply.ps1 -Plan <計畫> -Apply`。紀錄和 `organize-undo.ps1` 會複製到整理目標底下的 `_整理紀錄`，就算工作階段資料夾被刪也能還原。
-   - 移除項目預設送資源回收筒；放不進資源回收筒的會保留原檔並記為 `FAILED`。想要每一項都能用 `organize-undo.ps1` 還原，加 `-QuarantineDir <隔離資料夾>`。
-   - 重複檔在移除前會重新確認保留的那份還在、內容仍相同，否則略過。
-5. 驗證：最上層沒有散落的檔案、各資料夾數量和計畫相符、資源回收筒的數量相符。紀錄中有 `FAILED` 或 `SKIPPED` 的項目要逐一回報。
-6. 還原：`organize-undo.ps1 -Log <紀錄> -Apply`。有任何項目沒有回到原位（失敗、找不到、原位置已有同名項目）時結束代碼為 1，要把這些項目告訴使用者。
+1. `organize-plan.ps1 -Root <folder>` produces a plan CSV (nothing is moved). Without `-RulesFile`, the rules file is picked by language: `zh-TW` uses `assets/organize-rules.default.json` (Chinese folder names), `en` uses `assets/organize-rules.en.json` (English folder names). To customize, copy one, edit it, and pass it with `-RulesFile`.
+   - The script refuses to organize a drive root, the user profile folder itself or anything above it, system and program folders, the default user profile, `.ssh` / `.gnupg`, or `AppData` (only subfolders under Temp are allowed), because subfolders get moved wholesale. The check uses the final resolved location (after junctions, symlinks, 8.3 short names, and local admin shares), and it also refuses if the final location cannot be resolved. Add `-AllowUnsafeRoot` only when the user explicitly asks for it and understands the risk.
+2. Agree with the user on how to organize (by type, type + topic, or type + year), and what to do with installers, duplicates, archives that have already been extracted, and subfolders.
+3. Show the user a preview: file count per folder, which files went into each topic, and which files will be removed and why. If something is misclassified, adjust the rules and regenerate the plan. **Call out sensitive files explicitly.**
+4. Only after the user agrees, run `organize-apply.ps1 -Plan <plan> -Apply`. The log and `organize-undo.ps1` are copied into a log folder inside the organized folder (named by `logFolder` in the rules file; `_整理紀錄` in the Chinese rules, `_organize-logs` in the English rules), so the changes can be undone even if the session folder is deleted.
+   - Removed items go to the Recycle Bin by default; anything that will not fit is left in place and logged as `FAILED`. If every item must be restorable with `organize-undo.ps1`, add `-QuarantineDir <quarantine folder>`.
+   - Items sent to the Recycle Bin are marked `(RecycleBin)` in the `Final` column of the organize log CSV; this marker is the same in every language. `organize-undo.ps1` still reads the legacy `(資源回收筒)` marker in older logs.
+   - Before a duplicate is removed, the script re-checks that the copy being kept still exists and still has identical content; otherwise the duplicate is skipped.
+5. Verify: no loose files left at the top level, folder counts match the plan, and the Recycle Bin count matches. Report every `FAILED` or `SKIPPED` entry in the log to the user.
+6. Undo: `organize-undo.ps1 -Log <log> -Apply`. If any item does not make it back to its original location (failed, not found, or something with the same name is already there), the exit code is 1; tell the user which items those are.
 
-### 5. 軟硬體健康檢查
+### 5. Hardware and software health check
 
-1. 執行 `health-check.ps1`，它會產生 findings（嚴重／注意／資訊），每一項都附建議。
-2. 使用者要求「看工作管理員」時，可以用 computer use 打開工作管理員並截圖。**注意：** 系統管理員帳號下的工作管理員是以提高的權限執行，Windows 的 UIPI 會擋掉 computer use 的點擊與按鍵，所以只能看到預設畫面。這時改用效能計數器（`health-check.ps1` 已內建）補足，並告訴使用者原因。不要嘗試繞過。
-3. CPU 很高但工作管理員前幾名都很低時，代表負載被大量小程序分攤。看 `health.json` 的 `cpu.topProcesses`（依程式名稱合併）和 `duplicateProcesses`（同一個指令重複啟動 4 次以上）。
-4. 解讀規則與常見誤判見 [references/health-check-guide.md](references/health-check-guide.md)。
+1. Run `health-check.ps1`. It produces findings (critical / warning / info), each with a recommendation.
+2. If the user asks you to "look at Task Manager", you can open it with computer use and take a screenshot. **Note:** on an administrator account, Task Manager runs elevated, and Windows UIPI blocks computer use clicks and key presses, so you can only see the default view. Fall back to the performance counters (already built into `health-check.ps1`) and tell the user why. Do not try to work around it.
+3. If total CPU is high but the top entries in Task Manager are all low, the load is spread across many small processes. Check `cpu.topProcesses` (grouped by program name) and `duplicateProcesses` (the same command line started 4 or more times) in `health.json`.
+4. See [references/health-check-guide.md](references/health-check-guide.md) for how to interpret results and common false alarms.
 
-### 6. HTML 總整報告
+### 6. HTML report
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts/build-report.ps1 -SessionDir $S
 ```
 
-產生 `report.html`：單一檔案、完全離線、支援深色模式和列印。內容包括：
+This produces `report.html`: a single file that works fully offline and supports dark mode and printing. Its language follows the rules in "Language" above (normally the session language). It contains:
 
-1. 摘要：各磁碟開始時與現在的可用空間、紀錄中的釋放量、動作數、健檢發現數。
-2. 清理與變更紀錄：每一筆的時間、指令、實測釋放量、結果、還原方式、明細檔。
-3. 略過與待決定的項目。
-4. 健康檢查的發現與關鍵數據。
-5. 檔案整理的去向統計。
-6. 掃描摘要。
-7. 溯源方式：每個紀錄檔的用途與 SHA256，以及各種還原方式。
+1. Summary: free space on each drive at the start and now, space freed according to the log, number of actions, number of health findings.
+2. Cleanup and change log: time, command, measured space freed, result, how to undo, and detail file for each entry.
+3. Skipped and pending items.
+4. Health check findings and key figures.
+5. Where organized files went.
+6. Scan summary.
+7. Traceability: what each log file is for and its SHA256, plus every way to undo.
 
-用瀏覽器打開報告確認能正常顯示後，把路徑告訴使用者。報告含本機路徑與檔名，提醒使用者分享前先檢查。
+Open the report in a browser to confirm it renders correctly, then give the user its path. The report contains local paths and file names; remind the user to review it before sharing.
 
-### 7. 收尾回報
+### 7. Final summary
 
-用使用者的語言說明：
+In the user's language, explain:
 
-- 做了哪些事（指令、檔案），各釋放多少（實測）。
-- 為什麼這樣做；哪些估計和實際不同，原因是什麼。
-- 還沒做的、被跳過的、需要使用者自己處理的事（附步驟）。
-- 報告與紀錄檔的位置，以及怎麼還原。
+- What was done (commands, files) and how much each freed (measured).
+- Why it was done that way; which estimates differed from the actual results, and why.
+- What was not done, was skipped, or needs the user to handle it (with steps).
+- Where the report and log files are, and how to undo.
 
-## 參考資料
+## References
 
-- [references/safety-rules.md](references/safety-rules.md)：確認關卡與禁止事項
-- [references/cleanup-catalog.md](references/cleanup-catalog.md)：各清理位置的風險、方法與陷阱
-- [references/health-check-guide.md](references/health-check-guide.md)：健檢項目的解讀
-- [references/powershell-pitfalls.md](references/powershell-pitfalls.md)：撰寫與執行腳本時的陷阱
-- [references/prior-art.md](references/prior-art.md)：參考過的開源專案
+- [references/safety-rules.md](references/safety-rules.md): confirmation checkpoints and things never to do
+- [references/cleanup-catalog.md](references/cleanup-catalog.md): risk, method, and pitfalls for each cleanup location
+- [references/health-check-guide.md](references/health-check-guide.md): how to read health check results
+- [references/powershell-pitfalls.md](references/powershell-pitfalls.md): pitfalls when writing and running the scripts
+- [references/prior-art.md](references/prior-art.md): open-source projects consulted

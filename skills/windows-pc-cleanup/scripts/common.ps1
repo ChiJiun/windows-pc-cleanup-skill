@@ -1,7 +1,7 @@
 ﻿# 共用函式。其他腳本以 . "$PSScriptRoot\common.ps1" 載入。
 # 相容 Windows PowerShell 5.1 與 PowerShell 7。
 
-$script:PccVersion = '0.1.0'
+$script:PccVersion = '0.1.1'
 
 function Get-PccSessionDir {
     param([string]$SessionDir)
@@ -130,8 +130,50 @@ function Read-PccActions {
     @([System.IO.File]::ReadAllLines($file, [System.Text.Encoding]::UTF8) | Where-Object { $_.Trim() } | ForEach-Object { $_ | ConvertFrom-Json })
 }
 
+$script:PccBinInfo = @{}
+function Get-PccRecycleBinBlocker {
+    # 回傳「這個項目無法進資源回收筒」的原因；可以進資源回收筒時回傳 $null。
+    # Windows 遇到下列情況會不經詢問直接永久刪除，所以要事先擋下來：
+    # 網路或卸除式磁碟、群組原則停用資源回收筒、該磁碟設定為「不要移到資源回收筒」、項目大於資源回收筒上限。
+    # 資源回收筒只是已滿（但放得下這個項目）時，Windows 會清掉最舊的項目騰出空間，不會永久刪除這個項目。
+    param([string]$Path, [int64]$Bytes)
+    $full = [System.IO.Path]::GetFullPath($Path)
+    if ($full.StartsWith('\\')) { return '網路路徑沒有資源回收筒' }
+    $drive = $full.Substring(0, 2).ToUpper()
+    if (-not $script:PccBinInfo.ContainsKey($drive)) {
+        $info = @{ Blocker = $null; Cap = [int64]0 }
+        $disk = Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='$drive'" -ErrorAction SilentlyContinue
+        if (-not $disk -or $disk.DriveType -ne 3) { $info.Blocker = "$drive 不是本機固定磁碟，可能沒有資源回收筒" }
+        else {
+            foreach ($k in 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Policies\Explorer', 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Policies\Explorer') {
+                if ((Get-ItemProperty -LiteralPath $k -Name NoRecycleFiles -ErrorAction SilentlyContinue).NoRecycleFiles -eq 1) { $info.Blocker = '群組原則停用了資源回收筒' }
+            }
+            $vol = Get-CimInstance Win32_Volume -Filter "DriveLetter='$drive'" -ErrorAction SilentlyContinue | Select-Object -First 1
+            if (-not $info.Blocker -and $vol -and $vol.DeviceID -match '\{[0-9a-fA-F-]+\}') {
+                $p = Get-ItemProperty -LiteralPath "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\BitBucket\Volume\$($Matches[0])" -ErrorAction SilentlyContinue
+                if ($p -and $p.NukeOnDelete -eq 1) { $info.Blocker = "$drive 的資源回收筒設定為「不要將檔案移到資源回收筒」" }
+                elseif ($p -and $p.MaxCapacity) { $info.Cap = [int64]$p.MaxCapacity * 1MB }
+            }
+            # 讀不到設定時用保守的估計：磁碟容量的 5%
+            if (-not $info.Cap) { $info.Cap = [int64]([double]$disk.Size * 0.05) }
+        }
+        $script:PccBinInfo[$drive] = $info
+    }
+    $i = $script:PccBinInfo[$drive]
+    if ($i.Blocker) { return $i.Blocker }
+    if ($Bytes -gt $i.Cap) { return "大小 $(Format-PccSize $Bytes) 超過 $drive 資源回收筒上限 $(Format-PccSize $i.Cap)" }
+    return $null
+}
+
 function Remove-PccToRecycleBin {
-    param([string]$Path)
+    # 送資源回收筒。無法確定能進資源回收筒時丟出例外、不刪除，避免被 Windows 直接永久刪除。
+    param([string]$Path, [int64]$Bytes = -1)
+    if ($Bytes -lt 0) {
+        $item = Get-Item -LiteralPath $Path -Force
+        $Bytes = if ($item.PSIsContainer) { (Get-PccDirStats $item.FullName).Bytes } else { $item.Length }
+    }
+    $blocker = Get-PccRecycleBinBlocker -Path $Path -Bytes $Bytes
+    if ($blocker) { throw "無法送資源回收筒（為避免被直接永久刪除，已保留原檔）：$blocker" }
     Add-Type -AssemblyName Microsoft.VisualBasic
     $ui = [Microsoft.VisualBasic.FileIO.UIOption]::OnlyErrorDialogs
     $rc = [Microsoft.VisualBasic.FileIO.RecycleOption]::SendToRecycleBin

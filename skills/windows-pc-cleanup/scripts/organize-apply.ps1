@@ -32,17 +32,26 @@ foreach ($r in $rows) {
         } elseif ($r.Action -eq 'Recycle') {
             $item = Get-Item -LiteralPath $r.Source -Force
             $size = if ($item.PSIsContainer) { (Get-PccDirStats $item.FullName).Bytes } else { $item.Length }
+            # 重複檔：執行前重新確認保留的那份還在、內容仍然相同
+            $keep = if ($r.PSObject.Properties['Keep']) { $r.Keep } else { '' }
+            if ($keep -and -not (Test-Path -LiteralPath $keep -PathType Leaf)) { $status = 'SKIPPED: 保留的那份已不存在'; throw [System.OperationCanceledException]::new() }
+            if ($keep -and (Get-FileHash -LiteralPath $keep -Algorithm SHA256).Hash -ne (Get-FileHash -LiteralPath $r.Source -Algorithm SHA256).Hash) {
+                $status = 'SKIPPED: 與保留的那份內容已不同'; throw [System.OperationCanceledException]::new()
+            }
             if ($QuarantineDir) {
                 if (-not (Test-Path -LiteralPath $QuarantineDir)) { New-Item -ItemType Directory -Path $QuarantineDir -Force | Out-Null }
                 $final = Get-PccFreePath (Join-Path $QuarantineDir $item.Name)
                 Move-Item -LiteralPath $r.Source -Destination $final -ErrorAction Stop
                 $status = 'OK'
             } else {
-                Remove-PccToRecycleBin $r.Source
+                # 放不進資源回收筒時會丟出例外並保留原檔（記為 FAILED），不會被永久刪除
+                Remove-PccToRecycleBin -Path $r.Source -Bytes $size
                 $final = '(資源回收筒)'; $status = 'OK'
             }
             $recycledBytes += $size
         }
+    } catch [System.OperationCanceledException] {
+        # 上面已設定 SKIPPED 狀態
     } catch { $status = 'FAILED: ' + $_.Exception.Message }
     $log.Add([pscustomobject]@{ Source = $r.Source; Action = $r.Action; Final = $final; Status = $status; Reason = $r.Reason })
 }

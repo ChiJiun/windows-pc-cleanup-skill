@@ -18,3 +18,5 @@
 11. **字串內的 `$()` 再包雙引號**：`"... $(if ($a) { " -X `"$a`"" })"` 在 5.1 會解析失敗。先把字串組好放進變數再用。
 12. **函式名稱被內建別名蓋掉**：別名的優先順序高於函式。例如自訂 `function H {}` 會被 `h`（`Get-History`）蓋掉，呼叫時出現奇怪的參數錯誤。函式名稱避開 `h`、`r`、`gc`、`ls` 這類別名，用 `Get-Alias <名稱>` 先檢查。
 13. **沙箱網路**：在某些代理環境中 DNS 會被限制。連不到網路時先用 `Resolve-DnsName` 與 `Test-NetConnection` 判斷是本機網路問題還是沙箱限制，不要一直重試。
+14. **`-and` / `-or` 優先順序相同**：PowerShell 由左到右計算，`A -or B -and C` 等於 `(A -or B) -and C`，跟多數語言不同。混用時一定要加括號。
+15. **資源回收筒不一定會「回收」**：`SendToRecycleBin` 遇到網路或卸除式磁碟、資源回收筒被停用、項目大於上限時，會不經詢問直接永久刪除。用 `Remove-PccToRecycleBin`（會先檢查並在放不下時丟出例外），不要直接呼叫 `Microsoft.VisualBasic.FileIO.FileSystem`。

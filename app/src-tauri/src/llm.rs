@@ -60,8 +60,12 @@ struct Endpoint {
 }
 
 fn is_local_url(u: &str) -> bool {
-    let host = u.split("://").nth(1).unwrap_or(u).split(['/', ':']).next().unwrap_or("").to_lowercase();
-    host == "localhost" || host == "127.0.0.1" || host == "[::1]" || host.ends_with(".localhost")
+    // 用正式的網址解析取出主機名稱，避免 http://localhost:1@evil.example 這類寫法被誤判成本機
+    let Some(host) = reqwest::Url::parse(u).ok().and_then(|x| x.host_str().map(str::to_ascii_lowercase)) else { return false };
+    if host == "localhost" || host.ends_with(".localhost") {
+        return true;
+    }
+    host.trim_start_matches('[').trim_end_matches(']').parse::<std::net::IpAddr>().is_ok_and(|ip| ip.is_loopback())
 }
 
 fn endpoint(s: &Settings, key: Option<String>, zh: bool) -> Result<Endpoint, String> {
@@ -337,5 +341,10 @@ mod tests {
         assert!(is_local_url("http://127.0.0.1:1234/v1"));
         assert!(!is_local_url("https://api.openai.com/v1"));
         assert!(!is_local_url("http://localhost.evil.com/v1"));
+        assert!(!is_local_url("http://localhost:1@evil.example/v1"));
+        assert!(!is_local_url("http://127.0.0.1.evil.example/v1"));
+        assert!(is_local_url("http://[::1]:11434/v1"));
+        assert!(is_local_url("http://LOCALHOST:11434/v1"));
+        assert!(!is_local_url("not a url"));
     }
 }

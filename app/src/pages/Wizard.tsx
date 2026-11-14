@@ -251,7 +251,9 @@ export function Wizard() {
     setOrgPhase("applying");
     setOrgApply({ status: "running" });
     try {
-      const r = await api.runTool("organize_apply", { apply: true });
+      // 明確指定剛剛產生的計畫，避免套用到 AI 助理在同一個工作階段產生的其他計畫
+      if (!plan?.planFile) throw new Error(t("common.failedNoOutput"));
+      const r = await api.runTool("organize_apply", { plan: plan.planFile, apply: true });
       setOrgApply({ status: runStatusOf(r), result: r });
       setOrgPhase(r.cancelled ? "planned" : "done");
     } catch (e) {

@@ -14,8 +14,14 @@ jobs:
         shell: [powershell, pwsh]
     steps:
       - uses: actions/checkout@v4
-      - name: 執行測試（${{ matrix.shell }}）
-        shell: ${{ matrix.shell }}
+      # steps[*].shell 不能使用運算式，所以依 matrix 分成兩個步驟
+      - name: 執行測試（Windows PowerShell 5.1）
+        if: matrix.shell == 'powershell'
+        shell: powershell
+        run: ./tests/run-tests.ps1
+      - name: 執行測試（PowerShell 7）
+        if: matrix.shell == 'pwsh'
+        shell: pwsh
         run: ./tests/run-tests.ps1
       - name: 檢查 JSON 設定檔
         shell: pwsh

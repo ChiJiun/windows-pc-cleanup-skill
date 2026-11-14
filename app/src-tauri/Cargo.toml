@@ -1,0 +1,36 @@
+[package]
+name = "pc-cleanup"
+version = "0.1.0"
+description = "Windows PC Cleanup: scan, tiered cleanup, file organization and health check, with confirmation before every change"
+authors = ["ChiJiun"]
+license = "MIT"
+repository = "https://github.com/ChiJiun/windows-pc-cleanup-skill"
+edition = "2024"
+
+[lib]
+# 名稱加 _lib 是為了避免 Windows 上 lib 與 bin 同名衝突（cargo#8519）
+name = "pc_cleanup_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-opener = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+keyring = { version = "3", features = ["windows-native"] }
+base64 = "0.22"
+csv = "1"
+dirs = "6"
+regex = "1"
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_UI_Shell", "Win32_Globalization"] }
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+panic = "abort"
+strip = true

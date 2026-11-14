@@ -26,4 +26,32 @@ jobs:
       - name: 檢查 JSON 設定檔
         shell: pwsh
         run: |
-          Get-ChildItem -Recurse -Include *.json | ForEach-Object { Get-Content $_ -Raw | ConvertFrom-Json | Out-Null; "OK $($_.Name)" }
+          # app\ 底下是前端與 Rust 專案（tsconfig 允許註解、node_modules 很大），由 app job 檢查
+          Get-ChildItem -Recurse -Include *.json | Where-Object { $_.FullName -notmatch '\\app\\' } | ForEach-Object { Get-Content $_ -Raw | ConvertFrom-Json | Out-Null; "OK $($_.Name)" }
+
+  app:
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: app
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: app/pnpm-lock.yaml
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: app/src-tauri
+      - name: 安裝前端相依套件
+        run: pnpm install --frozen-lockfile
+      - name: 建置前端（tsc + vite）
+        run: pnpm build
+      - name: Rust 單元測試
+        working-directory: app/src-tauri
+        run: cargo test --locked

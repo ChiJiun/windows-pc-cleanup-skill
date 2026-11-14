@@ -1,0 +1,4 @@
+# 贊助按鈕設定。申請好帳號後，把對應的行取消註解並填入帳號名稱，GitHub repo 頁面就會出現「Sponsor」按鈕。
+# 桌面版的贊助按鈕在 app/src/funding.ts 設定。
+# github: [your-github-username]
+# ko_fi: your-kofi-name

@@ -17,6 +17,10 @@ Docs and script output are available in English and Traditional Chinese (see [La
 | Health check | CPU broken down by program, memory, SSD health, battery wear, devices, Defender, unexpected shutdowns, blue screens, Windows Update error codes explained, duplicated leftover processes; can use computer use to look at Task Manager |
 | HTML report | Disk space before and after, the command / measured space freed / undo method for every action, health findings, organization stats, and SHA256 of every log file |
 
+## Desktop app (preview)
+
+A standalone Windows app built on the same scripts lives in [`app/`](app/README.md): a cleanup wizard that works without AI, an optional AI assistant (Claude, ChatGPT, Gemini, Grok, Ollama, LM Studio), and an MCP server mode (`pc-cleanup.exe --mcp`). Every change still requires a Windows confirmation dialog. Builds are published as draft GitHub Releases.
+
 ## Installation
 
 **Option 1: Claude Code plugin marketplace**

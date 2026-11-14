@@ -17,6 +17,15 @@
 | 健康檢查 | CPU 拆解到程式層級、記憶體、SSD 健康、電池健康度、裝置、Defender、非預期關機、藍色畫面、Windows Update 錯誤碼解讀、重複啟動的殘留程序；可搭配 computer use 檢視工作管理員 |
 | HTML 總整報告 | 清理前後磁碟空間、每個動作的指令／實測釋放量／還原方式、健檢發現、整理統計、所有紀錄檔的 SHA256 |
 
+## 桌面版（預覽）
+
+[`app/`](app/README.md) 是用同一套腳本做成的 Windows 獨立程式，包含三種用法：
+- 不需要 AI 的清理精靈。
+- 可選的 AI 助理：Claude、ChatGPT、Gemini、Grok、Ollama、LM Studio。
+- MCP server 模式（`pc-cleanup.exe --mcp`）。
+
+任何改動仍然要經過 Windows 確認視窗。建置好的版本會以 GitHub Release 草稿發佈。
+
 ## 安裝
 
 **方法一：Claude Code plugin marketplace**

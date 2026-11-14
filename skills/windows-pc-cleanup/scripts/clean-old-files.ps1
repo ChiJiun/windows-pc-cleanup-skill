@@ -7,11 +7,12 @@ param(
     [int]$OlderThanDays = 7,
     [string[]]$ExcludeTopLevel = @(),
     [switch]$Recycle,
-    [switch]$Apply
+    [switch]$Apply,
+    [ValidateSet('zh-TW', 'en')][string]$Lang
 )
 . "$PSScriptRoot\common.ps1"
 $SessionDir = Get-PccSessionDir $SessionDir
-if (-not (Test-Path -LiteralPath $Path -PathType Container)) { throw "找不到資料夾：$Path" }
+if (-not (Test-Path -LiteralPath $Path -PathType Container)) { throw (Msg "找不到資料夾：$Path" "Folder not found: $Path") }
 $root = (Resolve-Path -LiteralPath $Path).ProviderPath.TrimEnd('\')
 $cut = (Get-Date).AddDays(-$OlderThanDays)
 
@@ -29,8 +30,8 @@ while ($stack.Count -gt 0) {
     }
 }
 $total = [int64](($candidates | Measure-Object Length -Sum).Sum)
-"符合條件：$($candidates.Count) 個檔案，$(Format-PccSize $total)（$root，超過 $OlderThanDays 天未修改，排除：$($ExcludeTopLevel -join ', ')）"
-if (-not $Apply) { '試跑模式：沒有刪除任何檔案。確認後加上 -Apply 執行。'; return }
+Msg "符合條件：$($candidates.Count) 個檔案，$(Format-PccSize $total)（$root，超過 $OlderThanDays 天未修改，排除：$($ExcludeTopLevel -join ', ')）" "Matched: $($candidates.Count) files, $(Format-PccSize $total) ($root, not modified for $OlderThanDays days, excluded: $($ExcludeTopLevel -join ', '))"
+if (-not $Apply) { Msg '試跑模式：沒有刪除任何檔案。確認後加上 -Apply 執行。' 'Dry run: nothing was deleted. Add -Apply after confirming.'; return }
 
 $detail = Join-Path $SessionDir ("clean-old-files-{0}.log" -f (Get-Date -Format 'yyyyMMdd-HHmmss'))
 $ok = 0; $okBytes = [int64]0; $fail = 0
@@ -53,9 +54,9 @@ $dirList | Where-Object { $_.LastWriteTime -lt $cut -and (Test-Path -LiteralPath
     }
 
 $result = if ($fail -eq 0) { 'done' } else { 'partial' }
-Write-PccAction -SessionDir $SessionDir -Category '清理' -Action "刪除超過 $OlderThanDays 天的舊檔" -Target $root `
+Write-PccAction -SessionDir $SessionDir -Category (Msg '清理' 'Cleanup') -Action (Msg "刪除超過 $OlderThanDays 天的舊檔" "Delete files older than $OlderThanDays days") -Target $root `
     -Command "clean-old-files.ps1 -Path `"$root`" -OlderThanDays $OlderThanDays -Apply$(if ($Recycle) { ' -Recycle' })" `
     -BytesFreed $okBytes -Result $result -Reversible $(if ($Recycle) { 'recycle-bin' } else { 'no' }) `
-    -UndoHint $(if ($Recycle) { '從資源回收筒還原' } else { '暫存檔，無法還原，也不需要還原' }) `
-    -Evidence (Split-Path $detail -Leaf) -Note "刪除 $ok 個，略過 $fail 個（被占用、唯讀或沒有權限$(if ($Recycle) { '、無法進資源回收筒' })；原因見明細）"
-"已刪除 $ok 個檔案（$(Format-PccSize $okBytes)），略過 $fail 個。明細：$detail"
+    -UndoHint $(if ($Recycle) { Msg '從資源回收筒還原' 'Restore from the Recycle Bin' } else { Msg '暫存檔，無法還原，也不需要還原' 'Temporary files; cannot and need not be restored' }) `
+    -Evidence (Split-Path $detail -Leaf) -Note (Msg "刪除 $ok 個，略過 $fail 個（被占用、唯讀或沒有權限$(if ($Recycle) { '、無法進資源回收筒' })；原因見明細）" "Deleted $ok, skipped $fail (in use, read-only or access denied$(if ($Recycle) { ', or cannot go to the Recycle Bin' }); see the detail log)")
+Msg "已刪除 $ok 個檔案（$(Format-PccSize $okBytes)），略過 $fail 個。明細：$detail" "Deleted $ok files ($(Format-PccSize $okBytes)), skipped $fail. Detail log: $detail"

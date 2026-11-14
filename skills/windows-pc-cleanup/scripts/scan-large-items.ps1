@@ -5,7 +5,8 @@ param(
     [string[]]$Roots,
     [int]$MinSizeMB = 500,
     [int]$Top = 40,
-    [string[]]$ExcludePattern = @('\\AppData\\Local\\Temp\\', '\\\$Recycle\.Bin\\', '\\System Volume Information\\')
+    [string[]]$ExcludePattern = @('\\AppData\\Local\\Temp\\', '\\\$Recycle\.Bin\\', '\\System Volume Information\\'),
+    [ValidateSet('zh-TW', 'en')][string]$Lang
 )
 . "$PSScriptRoot\common.ps1"
 $SessionDir = Get-PccSessionDir $SessionDir
@@ -51,6 +52,6 @@ $result = [ordered]@{
 }
 Save-PccJson $result (Join-Path $SessionDir 'large-items.json')
 
-"大於 $MinSizeMB MB 的檔案（前 $Top 個）:"
+Msg "大於 $MinSizeMB MB 的檔案（前 $Top 個）:" "Files larger than $MinSizeMB MB (top $Top):"
 $result.largeFiles | ForEach-Object { "  {0,10}  {1}  {2}" -f (Format-PccSize $_.Bytes), $_.LastWrite, $_.Path }
-if ($result.rootFolders) { '磁碟根目錄資料夾大小:'; $result.rootFolders | Select-Object -First 25 | ForEach-Object { "  {0,10}  {1}" -f (Format-PccSize $_.Bytes), $_.Path } }
+if ($result.rootFolders) { Msg '磁碟根目錄資料夾大小:' 'Top-level folder sizes:'; $result.rootFolders | Select-Object -First 25 | ForEach-Object { "  {0,10}  {1}" -f (Format-PccSize $_.Bytes), $_.Path } }

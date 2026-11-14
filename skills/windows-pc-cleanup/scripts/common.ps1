@@ -1,11 +1,42 @@
 ﻿# 共用函式。其他腳本以 . "$PSScriptRoot\common.ps1" 載入。
 # 相容 Windows PowerShell 5.1 與 PowerShell 7。
 
-$script:PccVersion = '0.1.1'
+$script:PccVersion = '0.2.0'
+
+# ---- 語言 ----
+# 所有腳本都可以加 -Lang zh-TW / en。沒指定時依序看：環境變數 PCC_LANG → 工作階段 baseline.json 的 lang → 系統介面語言。
+# 送資源回收筒的項目在整理紀錄中用語言無關的標記，舊版的中文標記也要能讀。
+$script:PccRecycleMarker = '(RecycleBin)'
+$script:PccRecycleMarkers = @('(RecycleBin)', '(資源回收筒)')
+function Get-PccLang {
+    param([string]$Lang, [string]$SessionDir)
+    if ($Lang -in 'zh-TW', 'en') { return $Lang }
+    if ($env:PCC_LANG -in 'zh-TW', 'en') { return $env:PCC_LANG }
+    if ($SessionDir) {
+        $bl = Join-Path $SessionDir 'baseline.json'
+        if (Test-Path -LiteralPath $bl) {
+            try { $l = ([System.IO.File]::ReadAllText($bl, [System.Text.Encoding]::UTF8) | ConvertFrom-Json).lang } catch { $l = $null }
+            if ($l -in 'zh-TW', 'en') { return $l }
+        }
+    }
+    if ((Get-UICulture).Name -like 'zh*') { 'zh-TW' } else { 'en' }
+}
+function Msg {
+    # 依目前語言回傳中文或英文訊息：Msg '中文' 'English'
+    param([string]$Zh, [string]$En)
+    if ($script:PccLang -eq 'en') { $En } else { $Zh }
+}
+function Get-PccDefaultRulesFile {
+    # 沒有指定 -RulesFile 時，依語言選擇預設的整理規則（資料夾名稱不同）
+    $name = if ($script:PccLang -eq 'en') { 'organize-rules.en.json' } else { 'organize-rules.default.json' }
+    Join-Path $PSScriptRoot "..\assets\$name"
+}
+# 載入時決定語言（呼叫端腳本的 -Lang 與 -SessionDir 參數此時已存在）
+$script:PccLang = Get-PccLang -Lang $(if (Test-Path variable:Lang) { $Lang }) -SessionDir $(if (Test-Path variable:SessionDir) { $SessionDir })
 
 function Get-PccSessionDir {
     param([string]$SessionDir)
-    if (-not $SessionDir) { throw '需要 -SessionDir。請先執行 new-session.ps1 取得工作階段資料夾。' }
+    if (-not $SessionDir) { throw (Msg '需要 -SessionDir。請先執行 new-session.ps1 取得工作階段資料夾。' '-SessionDir is required. Run new-session.ps1 first to create a session folder.') }
     if (-not (Test-Path -LiteralPath $SessionDir)) { New-Item -ItemType Directory -Path $SessionDir -Force | Out-Null }
     (Resolve-Path -LiteralPath $SessionDir).ProviderPath
 }
@@ -178,28 +209,28 @@ function Get-PccRecycleBinBlocker {
     # 判斷依據是項目「實際所在」的磁碟區（經過 junction、掛載點後的位置），不是路徑字面上的磁碟代號。
     # 無法確認時一律拒絕。資源回收筒只是已滿（但放得下）時，Windows 會清掉最舊的項目，不會永久刪除這個項目。
     param([string]$Path, [int64]$Bytes)
-    if ($Path -like '\\?\UNC\*' -or ($Path.StartsWith('\\') -and -not $Path.StartsWith('\\?\'))) { return '網路路徑沒有資源回收筒' }
+    if ($Path -like '\\?\UNC\*' -or ($Path.StartsWith('\\') -and -not $Path.StartsWith('\\?\'))) { return (Msg '網路路徑沒有資源回收筒' 'network paths have no Recycle Bin') }
     # 路徑字面上的磁碟代號必須是真正的磁碟區（subst 虛擬磁碟沒有自己的資源回收筒）
     if ($null -eq $script:PccVols) { $script:PccVols = @(Get-CimInstance Win32_Volume -ErrorAction SilentlyContinue) }  # 同一次執行只查一次
     $vols = $script:PccVols
     $plain = if ($Path -like '\\?\*') { $Path.Substring(4) } else { $Path }
-    if ($plain -match '^([A-Za-z]:)' -and -not ($vols | Where-Object { $_.DriveLetter -eq $Matches[1].ToUpper() })) { return "$($Matches[1]) 不是真正的磁碟區（可能是 subst 虛擬磁碟），不送資源回收筒" }
+    if ($plain -match '^([A-Za-z]:)' -and -not ($vols | Where-Object { $_.DriveLetter -eq $Matches[1].ToUpper() })) { return (Msg "$($Matches[1]) 不是真正的磁碟區（可能是 subst 虛擬磁碟），不送資源回收筒" "$($Matches[1]) is not a real volume (possibly a subst drive); not sending to the Recycle Bin") }
     $gp = Get-PccFinalPath -Path $Path -VolumeGuid
-    if (-not $gp -or $gp -notmatch '\{[0-9a-fA-F-]+\}') { return '無法確認項目實際所在的磁碟區（可能是網路位置或無法存取），不送資源回收筒' }
+    if (-not $gp -or $gp -notmatch '\{[0-9a-fA-F-]+\}') { return (Msg '無法確認項目實際所在的磁碟區（可能是網路位置或無法存取），不送資源回收筒' 'cannot determine which volume the item is actually on (network location or inaccessible); not sending to the Recycle Bin') }
     $guid = $Matches[0].ToLower()
     if (-not $script:PccBinInfo.ContainsKey($guid)) {
         $info = @{ Blocker = $null; Cap = [int64]0; Name = $guid }
         $vol = $vols | Where-Object { $_.DeviceID -and $_.DeviceID.ToLower().Contains($guid) } | Select-Object -First 1
-        if (-not $vol) { $info.Blocker = "找不到磁碟區 $guid 的資訊，無法確認資源回收筒設定" }
+        if (-not $vol) { $info.Blocker = (Msg "找不到磁碟區 $guid 的資訊，無法確認資源回收筒設定" "no information for volume $guid; cannot verify Recycle Bin settings") }
         else {
             $info.Name = if ($vol.DriveLetter) { $vol.DriveLetter } else { $vol.Name }
-            if ($vol.DriveType -ne 3) { $info.Blocker = "$($info.Name) 不是本機固定磁碟，可能沒有資源回收筒" }
+            if ($vol.DriveType -ne 3) { $info.Blocker = (Msg "$($info.Name) 不是本機固定磁碟，可能沒有資源回收筒" "$($info.Name) is not a local fixed disk and may have no Recycle Bin") }
             foreach ($k in 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Policies\Explorer', 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Policies\Explorer') {
-                if ((Get-ItemProperty -LiteralPath $k -Name NoRecycleFiles -ErrorAction SilentlyContinue).NoRecycleFiles -eq 1) { $info.Blocker = '群組原則停用了資源回收筒' }
+                if ((Get-ItemProperty -LiteralPath $k -Name NoRecycleFiles -ErrorAction SilentlyContinue).NoRecycleFiles -eq 1) { $info.Blocker = (Msg '群組原則停用了資源回收筒' 'the Recycle Bin is disabled by Group Policy') }
             }
             if (-not $info.Blocker) {
                 $p = Get-ItemProperty -LiteralPath "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\BitBucket\Volume\$guid" -ErrorAction SilentlyContinue
-                if ($p -and $p.NukeOnDelete -eq 1) { $info.Blocker = "$($info.Name) 的資源回收筒設定為「不要將檔案移到資源回收筒」" }
+                if ($p -and $p.NukeOnDelete -eq 1) { $info.Blocker = (Msg "$($info.Name) 的資源回收筒設定為「不要將檔案移到資源回收筒」" "$($info.Name) is set to remove files immediately instead of using the Recycle Bin") }
                 elseif ($p -and $p.MaxCapacity) { $info.Cap = [int64]$p.MaxCapacity * 1MB }
                 # 沒有登錄設定（從未調整過資源回收筒）時，用保守的估計：磁碟區容量的 5%
                 if (-not $info.Blocker -and -not $info.Cap) { $info.Cap = [int64]([double]$vol.Capacity * 0.05) }
@@ -209,7 +240,7 @@ function Get-PccRecycleBinBlocker {
     }
     $i = $script:PccBinInfo[$guid]
     if ($i.Blocker) { return $i.Blocker }
-    if ($Bytes -gt $i.Cap) { return "大小 $(Format-PccSize $Bytes) 超過 $($i.Name) 資源回收筒上限 $(Format-PccSize $i.Cap)" }
+    if ($Bytes -gt $i.Cap) { return (Msg "大小 $(Format-PccSize $Bytes) 超過 $($i.Name) 資源回收筒上限 $(Format-PccSize $i.Cap)" "size $(Format-PccSize $Bytes) exceeds the $($i.Name) Recycle Bin limit of $(Format-PccSize $i.Cap)") }
     return $null
 }
 
@@ -221,7 +252,7 @@ function Remove-PccToRecycleBin {
         $Bytes = if ($item.PSIsContainer) { (Get-PccDirStats $item.FullName).Bytes } else { $item.Length }
     }
     $blocker = Get-PccRecycleBinBlocker -Path $Path -Bytes $Bytes
-    if ($blocker) { throw "無法送資源回收筒（為避免被直接永久刪除，已保留原檔）：$blocker" }
+    if ($blocker) { throw (Msg "無法送資源回收筒（為避免被直接永久刪除，已保留原檔）：$blocker" "Cannot send to the Recycle Bin (original kept to avoid permanent deletion): $blocker") }
     Add-Type -AssemblyName Microsoft.VisualBasic
     $ui = [Microsoft.VisualBasic.FileIO.UIOption]::OnlyErrorDialogs
     $rc = [Microsoft.VisualBasic.FileIO.RecycleOption]::SendToRecycleBin

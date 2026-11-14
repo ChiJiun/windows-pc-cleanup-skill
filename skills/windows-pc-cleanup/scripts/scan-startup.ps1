@@ -1,5 +1,5 @@
 ﻿# 唯讀：開機啟動項目（含是否已在「啟動應用程式」中停用）與登入/開機觸發的非微軟排程工作。
-param([Parameter(Mandatory)][string]$SessionDir)
+param([Parameter(Mandatory)][string]$SessionDir, [ValidateSet('zh-TW', 'en')][string]$Lang)
 . "$PSScriptRoot\common.ps1"
 $SessionDir = Get-PccSessionDir $SessionDir
 
@@ -34,8 +34,8 @@ $tasks = @(Get-ScheduledTask -ErrorAction SilentlyContinue | Where-Object {
 $result = [ordered]@{ collectedAt = (Get-Date).ToString('yyyy-MM-ddTHH:mm:ssK'); startup = $startup; scheduledTasks = $tasks }
 Save-PccJson $result (Join-Path $SessionDir 'startup.json')
 
-'開機啟動（仍啟用）:'
+Msg '開機啟動（仍啟用）:' 'Startup items (enabled):'
 $startup | Where-Object State -eq 'enabled' | ForEach-Object { "  {0}  [{1}]" -f $_.Name, $_.Location }
-"已停用: $(@($startup | Where-Object State -eq 'disabled').Count) 項"
-'登入/開機時執行的非微軟排程工作:'
+Msg "已停用: $(@($startup | Where-Object State -eq 'disabled').Count) 項" "Disabled: $(@($startup | Where-Object State -eq 'disabled').Count)"
+Msg '登入/開機時執行的非微軟排程工作:' 'Non-Microsoft scheduled tasks triggered at logon/boot:'
 $tasks | ForEach-Object { "  $($_.Path)$($_.Name)" }

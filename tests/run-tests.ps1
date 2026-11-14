@@ -1,6 +1,8 @@
 ﻿# 不依賴 Pester 的測試，Windows PowerShell 5.1 與 PowerShell 7 都能跑。
 # 所有測試都在暫存資料夾中進行，不會動到使用者的檔案。
 $ErrorActionPreference = 'Stop'
+# 既有測試比對中文輸出，固定用 zh-TW；英文版另有一段測試（子程序會繼承這個環境變數）
+$env:PCC_LANG = 'zh-TW'
 $repo = Split-Path $PSScriptRoot -Parent
 $scripts = Join-Path $repo 'skills\windows-pc-cleanup\scripts'
 . (Join-Path $scripts 'common.ps1')
@@ -198,6 +200,65 @@ try {
     Assert ($html -notmatch '<script|<link|src=\"http|href=\"http') '沒有外部資源或腳本'
     $hashRow = [regex]::Match($html, 'actions\.jsonl</code></td><td class="num">[^<]*</td><td>[^<]*</td><td><code>([0-9A-F]{64})</code>')
     Assert ($hashRow.Success -and $hashRow.Groups[1].Value -eq (Get-FileHash (Join-Path $session 'actions.jsonl') -Algorithm SHA256).Hash) '報告中的 SHA256 與實際檔案相符'
+
+    Write-Host '== 英文版（-Lang en） =='
+    $enRules = Read-PccJson (Join-Path $repo 'skills\windows-pc-cleanup\assets\organize-rules.en.json')
+    Assert ($null -ne $enRules -and $enRules.topics.Count -eq $rules.topics.Count) '英文整理規則是合法 JSON，主題數與中文版相同'
+    foreach ($t in $enRules.topics) { try { [void]('x' -match $t.pattern); $ok = $true } catch { $ok = $false }; Assert $ok "英文主題「$($t.name)」的 pattern 是合法正規表示式" }
+    $enSession = (Run 'new-session.ps1' @('-Root', (Join-Path $work 'sessions-en'), '-Lang', 'en')).Trim()
+    Assert ((Read-PccJson (Join-Path $enSession 'baseline.json')).lang -eq 'en') 'baseline.json 記下 lang = en'
+    # 沒有 -Lang 也沒有 PCC_LANG 時，沿用工作階段記錄的語言
+    $env:PCC_LANG = $null
+    try { $enLogOut = Run 'log-action.ps1' @('-SessionDir', $enSession, '-Category', 'Test', '-Action', 'Pending item', '-Result', 'pending') }
+    finally { $env:PCC_LANG = 'zh-TW' }
+    Assert ($enLogOut -notmatch '[\u4e00-\u9fff]') "未指定語言時沿用 baseline 的 en（輸出：$($enLogOut.Trim())）"
+    $dlEn = Join-Path $work 'DownloadsEn'; New-Item -ItemType Directory -Path $dlEn | Out-Null
+    'hw' | Set-Content (Join-Path $dlEn 'HW1_answer.pdf'); 'img' | Set-Content (Join-Path $dlEn 'photo.png')
+    'secret' | Set-Content (Join-Path $dlEn 'openai-recovery-codes.txt'); 'x' | Set-Content (Join-Path $dlEn 'random-file.pdf')
+    New-Item -ItemType Directory -Path (Join-Path $dlEn 'proj') | Out-Null; 'n' | Set-Content (Join-Path $dlEn 'proj\readme.txt')
+    $enPlanOut = Run 'organize-plan.ps1' @('-SessionDir', $enSession, '-Root', $dlEn, '-Lang', 'en')
+    Assert ($enPlanOut -notmatch '[\u4e00-\u9fff]') '英文計畫輸出沒有中文'
+    $enPlan = @(Import-Csv (Get-ChildItem $enSession -Filter 'organize-plan-*.csv' | Select-Object -First 1).FullName)
+    $enBy = @{}; foreach ($p in $enPlan) { $enBy[(Split-Path $p.Source -Leaf)] = $p }
+    Assert ($enBy['HW1_answer.pdf'].Dest -like '*\Documents\Coursework\*') '作業分到 Documents\Coursework'
+    Assert ($enBy['random-file.pdf'].Dest -like '*\Documents\Unsorted\*') '無法判斷的文件分到 Documents\Unsorted'
+    Assert ($enBy['photo.png'].Dest -like '*\Images\*') '圖片分到 Images'
+    Assert ($enBy['openai-recovery-codes.txt'].Dest -like '*\Personal IDs and Secrets\*') '敏感檔集中到 Personal IDs and Secrets'
+    Assert ($enBy['proj'].Dest -like '*\Folders\proj') '子資料夾集中到 Folders'
+    $enApplyOut = Run 'organize-apply.ps1' @('-SessionDir', $enSession, '-Plan', (Get-ChildItem $enSession -Filter 'organize-plan-*.csv' | Select-Object -First 1).FullName, '-QuarantineDir', (Join-Path $work 'q-en'), '-Apply', '-Lang', 'en')
+    Assert ($enApplyOut -notmatch '[\u4e00-\u9fff]') '英文執行輸出沒有中文'
+    Assert (Test-Path (Join-Path $dlEn '_organize-logs\organize-undo.ps1')) '英文規則的紀錄資料夾是 _organize-logs'
+    # 新舊兩種資源回收筒標記都要被認得（舊標記用字元碼組出，避免依賴檔案編碼）
+    $legacyMarker = '(' + -join ([char[]](0x8CC7, 0x6E90, 0x56DE, 0x6536, 0x7B52)) + ')'
+    Assert ($script:PccRecycleMarkers -contains $legacyMarker -and $script:PccRecycleMarkers -contains '(RecycleBin)') 'common.ps1 同時認得新舊標記'
+    $binLog = Join-Path $work 'bin-log.csv'
+    @([pscustomobject]@{ Source = 'C:\x\a.txt'; Action = 'Recycle'; Final = '(RecycleBin)'; Status = 'OK'; Reason = '' },
+      [pscustomobject]@{ Source = 'C:\x\b.txt'; Action = 'Recycle'; Final = $legacyMarker; Status = 'OK'; Reason = '' }) | Export-Csv -LiteralPath $binLog -NoTypeInformation -Encoding UTF8
+    $binOut = Run 'organize-undo.ps1' @('-Log', $binLog, '-Lang', 'en')
+    Assert ($binOut -match '0 entries can be restored; 2 more are in the Recycle Bin') "undo 認得新舊標記且輸出英文（輸出：$($binOut.Trim())）"
+
+    Write-Host '== 換語言重新整理不會搬走另一種語言的分類與紀錄 =='
+    $mix = Join-Path $work 'mix'; New-Item -ItemType Directory -Path $mix | Out-Null
+    'hw' | Set-Content (Join-Path $mix 'HW2.pdf'); 'img' | Set-Content (Join-Path $mix 'pic.png')
+    $mixSession = Join-Path $work 'mix-session'
+    Run 'organize-plan.ps1' @('-SessionDir', $mixSession, '-Root', $mix, '-Lang', 'zh-TW') | Out-Null
+    $mixPlan = (Get-ChildItem $mixSession -Filter 'organize-plan-*.csv' | Select-Object -First 1).FullName
+    Run 'organize-apply.ps1' @('-SessionDir', $mixSession, '-Plan', $mixPlan, '-QuarantineDir', (Join-Path $work 'mix-q'), '-Apply', '-Lang', 'zh-TW') | Out-Null
+    # 自訂名稱的紀錄資料夾（裡面有還原腳本）也不能被搬走
+    $custom = Join-Path $mix 'my-logs'; New-Item -ItemType Directory -Path $custom | Out-Null
+    'x' | Set-Content (Join-Path $custom 'organize-undo.ps1')
+    New-Item -ItemType Directory -Path (Join-Path $mix 'random-folder') | Out-Null
+    $topBefore = @(Get-ChildItem $mix -Directory | ForEach-Object Name)
+    Run 'organize-plan.ps1' @('-SessionDir', $mixSession, '-Root', $mix, '-Lang', 'en') | Out-Null
+    $mixPlan2 = @(Get-ChildItem $mixSession -Filter 'organize-plan-*.csv' | Sort-Object LastWriteTime | Select-Object -Last 1)[0].FullName
+    $moved = @(Import-Csv $mixPlan2 | ForEach-Object { Split-Path $_.Source -Leaf })
+    Assert ($moved.Count -eq 1 -and $moved[0] -eq 'random-folder') "英文重新整理只搬一般子資料夾（第一次整理後的資料夾：$($topBefore -join ', ')；計畫：$($moved -join ', ')）"
+    $enOut = Join-Path $enSession 'report.html'
+    Run 'build-report.ps1' @('-SessionDir', $enSession, '-Lang', 'en') | Out-Null
+    $enHtml = [IO.File]::ReadAllText($enOut, [Text.Encoding]::UTF8)
+    Assert ($enHtml -match '<html lang="en">' -and $enHtml -match 'PC Cleanup and Health Report') '英文報告的語言與標題'
+    Assert ($enHtml -match '7\. Traceability' -and $enHtml -notmatch '溯源方式') '英文報告的章節是英文'
+    Assert ($enHtml -match '5\. File organization') '英文報告包含檔案整理統計'
 }
 finally {
     Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue

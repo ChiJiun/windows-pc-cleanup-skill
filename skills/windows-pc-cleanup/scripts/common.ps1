@@ -130,42 +130,86 @@ function Read-PccActions {
     @([System.IO.File]::ReadAllLines($file, [System.Text.Encoding]::UTF8) | Where-Object { $_.Trim() } | ForEach-Object { $_ | ConvertFrom-Json })
 }
 
+function Get-PccFinalPath {
+    # 用 Windows API 取得路徑的最終實際位置：路徑中任何一層的 junction、symlink、8.3 短檔名都會被解析。
+    # -VolumeGuid 時回傳 \\?\Volume{GUID}\... 形式（可分辨掛載到資料夾的磁碟區）。
+    # 解析失敗（不存在、無法存取、網路位置不支援 GUID 形式）回傳 $null，呼叫端應視為「無法確認」而拒絕。
+    param([string]$Path, [switch]$VolumeGuid)
+    if (-not ('PccNative' -as [type])) {
+        Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+using System.Text;
+public static class PccNative {
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    static extern IntPtr CreateFileW(string name, uint access, uint share, IntPtr sa, uint disposition, uint flags, IntPtr template);
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    static extern uint GetFinalPathNameByHandleW(IntPtr handle, StringBuilder buffer, uint length, uint flags);
+    [DllImport("kernel32.dll")]
+    static extern bool CloseHandle(IntPtr handle);
+    public static string GetFinalPath(string path, uint flags) {
+        // 存取權 0 + FILE_FLAG_BACKUP_SEMANTICS：可以開啟資料夾，也不需要讀取權限
+        IntPtr h = CreateFileW(path, 0, 7, IntPtr.Zero, 3, 0x02000000, IntPtr.Zero);
+        if (h == new IntPtr(-1)) return null;
+        try {
+            StringBuilder sb = new StringBuilder(32768);
+            uint n = GetFinalPathNameByHandleW(h, sb, (uint)sb.Capacity, flags);
+            if (n == 0 || n >= sb.Capacity) return null;
+            return sb.ToString();
+        } finally { CloseHandle(h); }
+    }
+}
+'@
+    }
+    $r = [PccNative]::GetFinalPath($Path, $(if ($VolumeGuid) { 1 } else { 0 }))
+    if (-not $r) { return $null }
+    if ($VolumeGuid) { return $r }
+    if ($r -like '\\?\UNC\*') { $r = '\\' + $r.Substring(8) } elseif ($r -like '\\?\*') { $r = $r.Substring(4) }
+    # 本機的系統管理共用（\\localhost\C$、\\電腦名稱\C$）視為本機路徑
+    if ($r -match '^\\\\([^\\]+)\\([A-Za-z])\$(\\.*)?$' -and @('localhost', '127.0.0.1', '::1', '[::1]', $env:COMPUTERNAME) -contains $Matches[1]) { $r = $Matches[2] + ':' + $(if ($Matches[3]) { $Matches[3] } else { '\' }) }
+    $r.TrimEnd('\')
+}
+
 $script:PccBinInfo = @{}
 function Get-PccRecycleBinBlocker {
     # 回傳「這個項目無法進資源回收筒」的原因；可以進資源回收筒時回傳 $null。
     # Windows 遇到下列情況會不經詢問直接永久刪除，所以要事先擋下來：
     # 網路或卸除式磁碟、群組原則停用資源回收筒、該磁碟設定為「不要移到資源回收筒」、項目大於資源回收筒上限。
-    # 資源回收筒只是已滿（但放得下這個項目）時，Windows 會清掉最舊的項目騰出空間，不會永久刪除這個項目。
+    # 判斷依據是項目「實際所在」的磁碟區（經過 junction、掛載點後的位置），不是路徑字面上的磁碟代號。
+    # 無法確認時一律拒絕。資源回收筒只是已滿（但放得下）時，Windows 會清掉最舊的項目，不會永久刪除這個項目。
     param([string]$Path, [int64]$Bytes)
-    if ($Path -like '\\?\UNC\*') { return '網路路徑沒有資源回收筒' }
-    if ($Path -like '\\?\*') { $Path = $Path.Substring(4) }
-    try { $full = [System.IO.Path]::GetFullPath($Path) } catch { return "無法解析路徑：$($_.Exception.Message)" }
-    if ($full.StartsWith('\\')) { return '網路路徑沒有資源回收筒' }
-    $drive = $full.Substring(0, 2).ToUpper()
-    if (-not $script:PccBinInfo.ContainsKey($drive)) {
-        $info = @{ Blocker = $null; Cap = [int64]0 }
-        $disk = Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='$drive'" -ErrorAction SilentlyContinue
-        if (-not $disk -or $disk.DriveType -ne 3) { $info.Blocker = "$drive 不是本機固定磁碟，可能沒有資源回收筒" }
+    if ($Path -like '\\?\UNC\*' -or ($Path.StartsWith('\\') -and -not $Path.StartsWith('\\?\'))) { return '網路路徑沒有資源回收筒' }
+    # 路徑字面上的磁碟代號必須是真正的磁碟區（subst 虛擬磁碟沒有自己的資源回收筒）
+    if ($null -eq $script:PccVols) { $script:PccVols = @(Get-CimInstance Win32_Volume -ErrorAction SilentlyContinue) }  # 同一次執行只查一次
+    $vols = $script:PccVols
+    $plain = if ($Path -like '\\?\*') { $Path.Substring(4) } else { $Path }
+    if ($plain -match '^([A-Za-z]:)' -and -not ($vols | Where-Object { $_.DriveLetter -eq $Matches[1].ToUpper() })) { return "$($Matches[1]) 不是真正的磁碟區（可能是 subst 虛擬磁碟），不送資源回收筒" }
+    $gp = Get-PccFinalPath -Path $Path -VolumeGuid
+    if (-not $gp -or $gp -notmatch '\{[0-9a-fA-F-]+\}') { return '無法確認項目實際所在的磁碟區（可能是網路位置或無法存取），不送資源回收筒' }
+    $guid = $Matches[0].ToLower()
+    if (-not $script:PccBinInfo.ContainsKey($guid)) {
+        $info = @{ Blocker = $null; Cap = [int64]0; Name = $guid }
+        $vol = $vols | Where-Object { $_.DeviceID -and $_.DeviceID.ToLower().Contains($guid) } | Select-Object -First 1
+        if (-not $vol) { $info.Blocker = "找不到磁碟區 $guid 的資訊，無法確認資源回收筒設定" }
         else {
+            $info.Name = if ($vol.DriveLetter) { $vol.DriveLetter } else { $vol.Name }
+            if ($vol.DriveType -ne 3) { $info.Blocker = "$($info.Name) 不是本機固定磁碟，可能沒有資源回收筒" }
             foreach ($k in 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Policies\Explorer', 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Policies\Explorer') {
                 if ((Get-ItemProperty -LiteralPath $k -Name NoRecycleFiles -ErrorAction SilentlyContinue).NoRecycleFiles -eq 1) { $info.Blocker = '群組原則停用了資源回收筒' }
             }
-            $vol = Get-CimInstance Win32_Volume -Filter "DriveLetter='$drive'" -ErrorAction SilentlyContinue | Select-Object -First 1
-            # 找不到對應的磁碟區（subst 虛擬磁碟、WMI 異常）就無法確認資源回收筒設定，直接拒絕
-            if (-not $info.Blocker -and -not ($vol -and $vol.DeviceID -match '\{[0-9a-fA-F-]+\}')) { $info.Blocker = "找不到 $drive 的磁碟區資訊（可能是 subst 虛擬磁碟），無法確認資源回收筒設定" }
-            if (-not $info.Blocker -and $vol.DeviceID -match '\{[0-9a-fA-F-]+\}') {
-                $p = Get-ItemProperty -LiteralPath "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\BitBucket\Volume\$($Matches[0])" -ErrorAction SilentlyContinue
-                if ($p -and $p.NukeOnDelete -eq 1) { $info.Blocker = "$drive 的資源回收筒設定為「不要將檔案移到資源回收筒」" }
+            if (-not $info.Blocker) {
+                $p = Get-ItemProperty -LiteralPath "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\BitBucket\Volume\$guid" -ErrorAction SilentlyContinue
+                if ($p -and $p.NukeOnDelete -eq 1) { $info.Blocker = "$($info.Name) 的資源回收筒設定為「不要將檔案移到資源回收筒」" }
                 elseif ($p -and $p.MaxCapacity) { $info.Cap = [int64]$p.MaxCapacity * 1MB }
+                # 沒有登錄設定（從未調整過資源回收筒）時，用保守的估計：磁碟區容量的 5%
+                if (-not $info.Blocker -and -not $info.Cap) { $info.Cap = [int64]([double]$vol.Capacity * 0.05) }
             }
-            # 磁碟區存在但沒有登錄設定（從未調整過資源回收筒）時，用保守的估計：磁碟容量的 5%
-            if (-not $info.Blocker -and -not $info.Cap) { $info.Cap = [int64]([double]$disk.Size * 0.05) }
         }
-        $script:PccBinInfo[$drive] = $info
+        $script:PccBinInfo[$guid] = $info
     }
-    $i = $script:PccBinInfo[$drive]
+    $i = $script:PccBinInfo[$guid]
     if ($i.Blocker) { return $i.Blocker }
-    if ($Bytes -gt $i.Cap) { return "大小 $(Format-PccSize $Bytes) 超過 $drive 資源回收筒上限 $(Format-PccSize $i.Cap)" }
+    if ($Bytes -gt $i.Cap) { return "大小 $(Format-PccSize $Bytes) 超過 $($i.Name) 資源回收筒上限 $(Format-PccSize $i.Cap)" }
     return $null
 }
 

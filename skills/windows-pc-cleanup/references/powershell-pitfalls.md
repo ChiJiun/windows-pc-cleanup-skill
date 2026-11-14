@@ -20,3 +20,4 @@
 13. **沙箱網路**：在某些代理環境中 DNS 會被限制。連不到網路時先用 `Resolve-DnsName` 與 `Test-NetConnection` 判斷是本機網路問題還是沙箱限制，不要一直重試。
 14. **`-and` / `-or` 優先順序相同**：PowerShell 由左到右計算，`A -or B -and C` 等於 `(A -or B) -and C`，跟多數語言不同。混用時一定要加括號。
 15. **資源回收筒不一定會「回收」**：`SendToRecycleBin` 遇到網路或卸除式磁碟、資源回收筒被停用、項目大於上限時，會不經詢問直接永久刪除。用 `Remove-PccToRecycleBin`（會先檢查並在放不下時丟出例外），不要直接呼叫 `Microsoft.VisualBasic.FileIO.FileSystem`。
+16. **路徑字面不等於實際位置**：Windows 內建 `C:\Documents and Settings`（junction）、`C:\Users\All Users`（symlink，5.1 的 `Get-Item` 讀不到 `Target`），加上 8.3 短檔名（`PROGRA~1`）和 `\\localhost\C$`，都能讓字串比對失效。判斷「這是不是危險位置」或「在哪顆磁碟」時用 `Get-PccFinalPath`（`GetFinalPathNameByHandleW`），解析失敗就拒絕。

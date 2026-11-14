@@ -1,6 +1,6 @@
 ﻿# 依 organize-apply.ps1 的執行紀錄，把搬移過（含隔離資料夾）的項目搬回原位。
 # 送進資源回收筒的項目請從資源回收筒手動「還原」。預設只試跑；加上 -Apply 才執行。
-# 有任何項目還原失敗時，結束代碼為 1。
+# 有任何項目沒有還原（失敗、找不到或原位置已有同名項目）時，結束代碼為 1。
 param([Parameter(Mandatory)][string]$Log, [switch]$Apply)
 $rows = @(Import-Csv -LiteralPath $Log | Where-Object { $_.Status -eq 'OK' -and $_.Final -and $_.Final -ne '(資源回收筒)' })
 [array]::Reverse($rows)
@@ -19,4 +19,5 @@ foreach ($r in $rows) {
     } catch { "失敗：$($r.Final) → $($r.Source)：$($_.Exception.Message)"; $fail++ }
 }
 "已還原 $ok 筆，略過 $skip 筆，失敗 $fail 筆。"
-if ($fail -gt 0) { exit 1 }
+# 有任何項目沒有回到原位（失敗或略過）就回傳 1，讓呼叫端知道還原不完整
+if ($fail -gt 0 -or $skip -gt 0) { exit 1 }

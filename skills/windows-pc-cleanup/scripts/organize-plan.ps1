@@ -13,50 +13,40 @@ if (-not $RulesFile) { $RulesFile = Join-Path $PSScriptRoot '..\assets\organize-
 $SessionDir = Get-PccSessionDir $SessionDir
 $Root = (Resolve-Path -LiteralPath $Root).ProviderPath.TrimEnd('\')
 
-# 擋下危險的整理目標：磁碟根目錄、使用者資料夾本身或它的上層、系統與程式資料夾、AppData（只允許 Temp 底下的子資料夾）
+# 擋下危險的整理目標：磁碟根目錄、使用者資料夾本身或它的上層、系統與程式資料夾、預設使用者設定檔、
+# .ssh／.gnupg、AppData（只允許 Temp 底下的子資料夾）。
+# 判斷時用 Get-PccFinalPath 取得最終實際位置（解析路徑中任何一層的 junction、symlink、8.3 短檔名），
+# 例如 C:\Documents and Settings\<user>\AppData、C:\Users\All Users、C:\PROGRA~1 都會被還原成真正的位置。
+# 解析不出實際位置時一律拒絕（fail-closed）。
 function Test-PccUnder([string]$Child, [string]$Parent) {
     if (-not $Child -or -not $Parent) { return $false }
     ($Child.TrimEnd('\') + '\').StartsWith($Parent.TrimEnd('\') + '\', [StringComparison]::OrdinalIgnoreCase)
 }
-function ConvertTo-PccLongPath([string]$Path) {
-    # 去掉 \\?\ 前綴，並逐層把 8.3 短檔名（例如 PROGRA~1）換成實際名稱
-    if ($Path -like '\\?\UNC\*') { $Path = '\\' + $Path.Substring(8) } elseif ($Path -like '\\?\*') { $Path = $Path.Substring(4) }
-    if ($Path -notmatch '^[A-Za-z]:\\') { return $Path.TrimEnd('\') }
-    $cur = $Path.Substring(0, 3)
-    foreach ($seg in ($Path.Substring(3).Split('\') | Where-Object { $_ })) {
-        $name = $seg
-        if ($seg -match '~') {
-            # -Filter 交給 Windows 比對，短檔名也會命中，回傳的是實際（長）名稱
-            $hit = Get-ChildItem -LiteralPath $cur -Filter $seg -Force -ErrorAction SilentlyContinue | Select-Object -First 1
-            if ($hit) { $name = $hit.Name }
-        }
-        $cur = Join-Path $cur $name
-    }
-    $cur.TrimEnd('\')
-}
+function Get-PccResolved([string]$Path) { $f = Get-PccFinalPath $Path; if ($f) { $f } else { $Path.TrimEnd('\') } }
 function Get-PccUnsafeReason([string]$P) {
     # 注意：PowerShell 的 -and / -or 優先順序相同，要加括號
     if (($P -match '^[A-Za-z]:$') -or ($P.StartsWith('\\') -and $P.TrimStart('\').Split('\').Count -le 2)) { return '磁碟或網路分享的根目錄' }
-    if (Test-PccUnder (ConvertTo-PccLongPath $env:USERPROFILE) $P) { return '使用者資料夾本身或它的上層' }
-    foreach ($s in @($env:SystemRoot, $env:ProgramFiles, ${env:ProgramFiles(x86)}, $env:ProgramData)) {
-        if ($s -and (Test-PccUnder $P (ConvertTo-PccLongPath $s))) { return "系統或程式資料夾（$s）" }
+    $profileDir = Get-PccResolved $env:USERPROFILE
+    if (Test-PccUnder $profileDir $P) { return '使用者資料夾本身或它的上層' }
+    $usersDir = Split-Path $profileDir -Parent
+    $protected = @($env:SystemRoot, $env:ProgramFiles, ${env:ProgramFiles(x86)}, $env:ProgramData,
+        (Join-Path $usersDir 'Default'), (Join-Path $profileDir '.ssh'), (Join-Path $profileDir '.gnupg'))
+    foreach ($s in $protected) {
+        if ($s -and (Test-PccUnder $P (Get-PccResolved $s))) { return "系統、程式或帳號設定資料夾（$s）" }
     }
     # AppData（含 Local、Roaming、LocalLow 與 AppData 本身）一律拒絕，只允許 Temp「底下」的子資料夾，不含 Temp 本身
-    $appData = ConvertTo-PccLongPath (Join-Path $env:USERPROFILE 'AppData')
+    $appData = Join-Path $profileDir 'AppData'
     if (Test-PccUnder $P $appData) {
-        foreach ($t in @((ConvertTo-PccLongPath $env:TEMP), (ConvertTo-PccLongPath (Join-Path $env:LOCALAPPDATA 'Temp')))) {
+        foreach ($t in @((Get-PccResolved $env:TEMP), (Join-Path $appData 'Local\Temp'))) {
             if ($t -and (Test-PccUnder $P $t) -and $P.TrimEnd('\').Length -gt $t.TrimEnd('\').Length) { return $null }
         }
         return "應用程式資料夾（$appData）"
     }
     return $null
 }
-# 同時檢查原路徑、展開短檔名後的路徑，以及 junction／symlink 的實際位置
-$checkPaths = @($Root, (ConvertTo-PccLongPath $Root))
-$realRoot = Resolve-PccRealPath $Root
-if ($realRoot) { $checkPaths += (ConvertTo-PccLongPath $realRoot) }
-$unsafe = $null
-foreach ($cp in ($checkPaths | Select-Object -Unique)) { $unsafe = Get-PccUnsafeReason $cp; if ($unsafe) { break } }
+$finalRoot = Get-PccFinalPath $Root
+$unsafe = if (-not $finalRoot) { '無法解析實際位置' } else { $null }
+foreach ($cp in @($Root, $finalRoot) | Where-Object { $_ } | Select-Object -Unique) { if (-not $unsafe) { $unsafe = Get-PccUnsafeReason $cp } }
 if ($unsafe -and -not $AllowUnsafeRoot) {
     throw "不建議整理這個位置：$Root（$unsafe）。整理會把子資料夾整批搬走，可能讓程式或系統壞掉。請改指定 Downloads、Desktop 這類資料夾；確定要整理時，先取得使用者明確同意再加 -AllowUnsafeRoot。"
 }

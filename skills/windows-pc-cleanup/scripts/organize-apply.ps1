@@ -52,7 +52,8 @@ foreach ($r in $rows) {
             $recycledBytes += $size
         }
     } catch [System.OperationCanceledException] {
-        # 上面已設定 SKIPPED 狀態
+        # 上面主動丟出的會先設定 SKIPPED；殼層刪除被取消（例如錯誤對話框按了取消）也是這個例外，這時記為 FAILED
+        if (-not $status) { $status = 'FAILED: 刪除被取消（' + $_.Exception.Message + '）' }
     } catch { $status = 'FAILED: ' + $_.Exception.Message }
     $log.Add([pscustomobject]@{ Source = $r.Source; Action = $r.Action; Final = $final; Status = $status; Reason = $r.Reason })
 }

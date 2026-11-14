@@ -114,6 +114,77 @@ try {
     $after = @(Get-ChildItem $dl -Recurse -Force | ForEach-Object { $_.FullName.Substring($dl.Length) } | Sort-Object)
     Assert ((Compare-Object $before $after).Count -eq 0) "還原後結構與原本相同（差異：$((Compare-Object $before $after | ForEach-Object { $_.InputObject }) -join ', ')）"
 
+    Write-Host '== 資源回收筒放不下時不刪除 =='
+    $binFile = Join-Path $work 'bin-test.txt'; 'x' | Set-Content $binFile
+    Assert ($null -eq (Get-PccRecycleBinBlocker -Path $binFile -Bytes 10)) '本機小檔案可以進資源回收筒'
+    Assert ([bool](Get-PccRecycleBinBlocker -Path '\\server\share\a.txt' -Bytes 10)) '網路路徑判定為無法進資源回收筒'
+    Assert ([bool](Get-PccRecycleBinBlocker -Path $binFile -Bytes (1024L * 1TB))) '超過上限判定為無法進資源回收筒'
+    $threw = $false; try { Remove-PccToRecycleBin -Path $binFile -Bytes (1024L * 1TB) } catch { $threw = $true }
+    Assert ($threw -and (Test-Path $binFile)) '放不下時丟出例外並保留原檔'
+
+    Write-Host '== 整理計畫拒絕危險的根目錄 =='
+    $planCount = @(Get-ChildItem $session -Filter 'organize-plan-*.csv').Count
+    $o1 = Run 'organize-plan.ps1' @('-SessionDir', $session, '-Root', $env:USERPROFILE)
+    $o2 = Run 'organize-plan.ps1' @('-SessionDir', $session, '-Root', ($env:SystemDrive + '\'))
+    Assert ($o1 -match '不建議整理') '拒絕使用者資料夾本身'
+    Assert ($o2 -match '不建議整理') '拒絕磁碟根目錄'
+    $appDataRoot = Join-Path $env:USERPROFILE 'AppData'
+    Assert ((Run 'organize-plan.ps1' @('-SessionDir', $session, '-Root', $appDataRoot)) -match '不建議整理') '拒絕 AppData 本身'
+    $lowDir = Join-Path $appDataRoot 'LocalLow'
+    if (Test-Path $lowDir) { Assert ((Run 'organize-plan.ps1' @('-SessionDir', $session, '-Root', $lowDir)) -match '不建議整理') '拒絕 AppData\LocalLow' }
+    Assert ((Run 'organize-plan.ps1' @('-SessionDir', $session, '-Root', $env:TEMP)) -match '不建議整理') '拒絕 Temp 本身（只允許 Temp 底下的子資料夾）'
+    if (Test-Path -LiteralPath ($env:SystemDrive + '\PROGRA~1')) {
+        Assert ((Run 'organize-plan.ps1' @('-SessionDir', $session, '-Root', ($env:SystemDrive + '\PROGRA~1'))) -match '不建議整理') '拒絕 8.3 短檔名的 Program Files'
+        Assert ((Get-PccFinalPath ($env:SystemDrive + '\PROGRA~1')) -eq $env:ProgramFiles) 'Get-PccFinalPath 展開 8.3 短檔名'
+    } else { Write-Host '  SKIP  系統磁碟沒有 8.3 短檔名，略過 PROGRA~1 測試' }
+    # Windows 內建的相容性連結：路徑中間或最後一層是 junction／symlink
+    $das = Join-Path ($env:SystemDrive + '\Documents and Settings') (Join-Path $env:USERNAME 'AppData')
+    if (Get-PccFinalPath $das) { Assert ((Run 'organize-plan.ps1' @('-SessionDir', $session, '-Root', $das)) -match '不建議整理') '拒絕經由 Documents and Settings 的 AppData' }
+    else { Write-Host '  SKIP  沒有 Documents and Settings 相容性連結' }
+    $allUsers = Join-Path (Split-Path $env:USERPROFILE -Parent) 'All Users'
+    if (Get-PccFinalPath $allUsers) { Assert ((Run 'organize-plan.ps1' @('-SessionDir', $session, '-Root', $allUsers)) -match '不建議整理') '拒絕 All Users（實際是 ProgramData）' }
+    else { Write-Host '  SKIP  沒有 All Users 相容性連結' }
+    $defAppData = Join-Path (Split-Path $env:USERPROFILE -Parent) 'Default\AppData'
+    if (Test-Path -LiteralPath $defAppData) { Assert ((Run 'organize-plan.ps1' @('-SessionDir', $session, '-Root', $defAppData)) -match '不建議整理') '拒絕預設使用者設定檔' }
+    $adminShare = '\\localhost\' + $env:SystemDrive.TrimEnd(':') + '$\Users\' + $env:USERNAME + '\AppData'
+    if (Get-PccFinalPath $adminShare) { Assert ((Run 'organize-plan.ps1' @('-SessionDir', $session, '-Root', $adminShare)) -match '不建議整理') '拒絕經由本機系統管理共用的 AppData' }
+    else { Write-Host '  SKIP  無法存取本機系統管理共用' }
+    Assert ((Get-PccFinalPath (Join-Path $scan 'link')) -eq $real) 'Get-PccFinalPath 解析 junction'
+    Assert ($null -eq (Get-PccFinalPath (Join-Path $work 'no-such-dir'))) 'Get-PccFinalPath 解析失敗時回傳 null'
+    $toProfile = Join-Path $work 'to-profile'
+    New-Item -ItemType Junction -Path $toProfile -Target $env:USERPROFILE | Out-Null
+    try { Assert ((Run 'organize-plan.ps1' @('-SessionDir', $session, '-Root', $toProfile)) -match '不建議整理') '拒絕指向使用者資料夾的 junction' }
+    finally { [IO.Directory]::Delete($toProfile, $false) }  # 只刪連結本身，不碰目標
+    Assert ((Test-Path $env:USERPROFILE) -and -not (Test-Path $toProfile)) '測試用 junction 已移除，目標完好'
+    Assert (@(Get-ChildItem $session -Filter 'organize-plan-*.csv').Count -eq $planCount) '被拒絕時沒有產生計畫'
+    Assert ($byName['report (1).pdf'].Keep -like '*\report.pdf') '重複檔的計畫記下保留的那份'
+    Assert ($byName['openai-recovery-codes.txt'] -and ((Run 'organize-plan.ps1' @('-SessionDir', $session, '-Root', $dl)) -notmatch 'openai-recovery')) '輸出不印出敏感檔名'
+
+    Write-Host '== 重複檔：保留的那份被改動時略過 =='
+    $dup = Join-Path $work 'dup'; New-Item -ItemType Directory -Path $dup | Out-Null
+    'same' | Set-Content (Join-Path $dup 'a.txt'); 'same' | Set-Content (Join-Path $dup 'a (1).txt')
+    $dupSession = Join-Path $work 'dup-session'
+    Run 'organize-plan.ps1' @('-SessionDir', $dupSession, '-Root', $dup) | Out-Null
+    $dupPlan = (Get-ChildItem $dupSession -Filter 'organize-plan-*.csv' | Select-Object -First 1).FullName
+    'changed' | Set-Content (Join-Path $dup 'a.txt')
+    Run 'organize-apply.ps1' @('-SessionDir', $dupSession, '-Plan', $dupPlan, '-QuarantineDir', (Join-Path $work 'dup-q'), '-Apply') | Out-Null
+    $dupLog = Import-Csv (Get-ChildItem $dupSession -Filter 'organize-log-*.csv' | Select-Object -First 1).FullName
+    Assert (($dupLog | Where-Object { $_.Source -like '*a (1).txt' }).Status -like 'SKIPPED*') '內容已不同時略過，不移除'
+    Assert (Test-Path (Join-Path $dup 'a (1).txt')) '被略過的重複檔仍在原位'
+
+    Write-Host '== 還原失敗會被計入 =='
+    $u = Join-Path $work 'undo'; New-Item -ItemType Directory -Path $u | Out-Null
+    $moved = Join-Path $u 'moved.txt'; 'm' | Set-Content $moved
+    $undoLog = Join-Path $u 'log.csv'
+    @([pscustomobject]@{ Source = (Join-Path $u 'orig.txt'); Action = 'Move'; Final = $moved; Status = 'OK'; Reason = '' }) | Export-Csv -LiteralPath $undoLog -NoTypeInformation -Encoding UTF8
+    $lock = [IO.File]::Open($moved, 'Open', 'Read', 'None')
+    try { $uo = Run 'organize-undo.ps1' @('-Log', $undoLog, '-Apply'); $uCode = $LASTEXITCODE } finally { $lock.Close() }
+    Assert ($uo -match '失敗 1 筆' -and $uo -match '已還原 0 筆') "搬移失敗時不算成功（輸出：$($uo.Trim() -replace '\s+', ' ')）"
+    Assert ($uCode -eq 1) '還原失敗時結束代碼為 1'
+    Remove-Item -LiteralPath $moved -Force
+    $uo2 = Run 'organize-undo.ps1' @('-Log', $undoLog, '-Apply'); $uCode2 = $LASTEXITCODE
+    Assert ($uo2 -match '略過 1 筆' -and $uCode2 -eq 1) '找不到要還原的檔案時結束代碼也是 1'
+
     Write-Host '== HTML 報告 =='
     $out = Join-Path $session 'report.html'
     Run 'build-report.ps1' @('-SessionDir', $session) | Out-Null

@@ -38,7 +38,7 @@ $sw = New-Object System.IO.StreamWriter($detail, $false, (New-Object System.Text
 foreach ($f in $candidates) {
     try {
         $len = $f.Length
-        if ($Recycle) { Remove-PccToRecycleBin $f.FullName } else { [System.IO.File]::Delete($f.FullName) }
+        if ($Recycle) { Remove-PccToRecycleBin -Path $f.FullName -Bytes $len } else { [System.IO.File]::Delete($f.FullName) }
         $ok++; $okBytes += $len; $sw.WriteLine("DELETED`t$len`t$($f.FullName)")
     } catch { $fail++; $sw.WriteLine("SKIPPED`t0`t$($f.FullName)`t$($_.Exception.Message)") }
 }
@@ -47,12 +47,15 @@ $sw.Close()
 # 用列舉當下快取的修改時間判斷（刪檔後資料夾時間會被更新成現在）
 $dirList | Where-Object { $_.LastWriteTime -lt $cut -and (Test-Path -LiteralPath $_.FullName) } |
     Sort-Object { $_.FullName.Length } -Descending |
-    ForEach-Object { if (-not (Get-ChildItem -LiteralPath $_.FullName -Force -ErrorAction SilentlyContinue)) { Remove-Item -LiteralPath $_.FullName -Force -ErrorAction SilentlyContinue } }
+    ForEach-Object {
+        # 用 .NET 刪除（非遞迴）：資料夾不是空的或沒有權限時直接失敗，不會跳出確認提示卡住
+        try { [System.IO.Directory]::Delete($_.FullName, $false) } catch { }
+    }
 
 $result = if ($fail -eq 0) { 'done' } else { 'partial' }
 Write-PccAction -SessionDir $SessionDir -Category '清理' -Action "刪除超過 $OlderThanDays 天的舊檔" -Target $root `
     -Command "clean-old-files.ps1 -Path `"$root`" -OlderThanDays $OlderThanDays -Apply$(if ($Recycle) { ' -Recycle' })" `
     -BytesFreed $okBytes -Result $result -Reversible $(if ($Recycle) { 'recycle-bin' } else { 'no' }) `
     -UndoHint $(if ($Recycle) { '從資源回收筒還原' } else { '暫存檔，無法還原，也不需要還原' }) `
-    -Evidence (Split-Path $detail -Leaf) -Note "刪除 $ok 個，略過 $fail 個（被占用）"
+    -Evidence (Split-Path $detail -Leaf) -Note "刪除 $ok 個，略過 $fail 個（被占用、唯讀或沒有權限$(if ($Recycle) { '、無法進資源回收筒' })；原因見明細）"
 "已刪除 $ok 個檔案（$(Format-PccSize $okBytes)），略過 $fail 個。明細：$detail"

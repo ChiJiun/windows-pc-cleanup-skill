@@ -32,17 +32,28 @@ foreach ($r in $rows) {
         } elseif ($r.Action -eq 'Recycle') {
             $item = Get-Item -LiteralPath $r.Source -Force
             $size = if ($item.PSIsContainer) { (Get-PccDirStats $item.FullName).Bytes } else { $item.Length }
+            # 重複檔：執行前重新確認保留的那份還在、內容仍然相同
+            $keep = if ($r.PSObject.Properties['Keep']) { $r.Keep } else { '' }
+            if ($keep -and -not (Test-Path -LiteralPath $keep -PathType Leaf)) { $status = 'SKIPPED: 保留的那份已不存在'; throw [System.OperationCanceledException]::new() }
+            # 讀不到檔案時讓 Get-FileHash 丟出例外，記為 FAILED 並帶出真正原因
+            if ($keep -and (Get-FileHash -LiteralPath $keep -Algorithm SHA256 -ErrorAction Stop).Hash -ne (Get-FileHash -LiteralPath $r.Source -Algorithm SHA256 -ErrorAction Stop).Hash) {
+                $status = 'SKIPPED: 與保留的那份內容已不同'; throw [System.OperationCanceledException]::new()
+            }
             if ($QuarantineDir) {
                 if (-not (Test-Path -LiteralPath $QuarantineDir)) { New-Item -ItemType Directory -Path $QuarantineDir -Force | Out-Null }
                 $final = Get-PccFreePath (Join-Path $QuarantineDir $item.Name)
                 Move-Item -LiteralPath $r.Source -Destination $final -ErrorAction Stop
                 $status = 'OK'
             } else {
-                Remove-PccToRecycleBin $r.Source
+                # 放不進資源回收筒時會丟出例外並保留原檔（記為 FAILED），不會被永久刪除
+                Remove-PccToRecycleBin -Path $r.Source -Bytes $size
                 $final = '(資源回收筒)'; $status = 'OK'
             }
             $recycledBytes += $size
         }
+    } catch [System.OperationCanceledException] {
+        # 上面主動丟出的會先設定 SKIPPED；殼層刪除被取消（例如錯誤對話框按了取消）也是這個例外，這時記為 FAILED
+        if (-not $status) { $status = 'FAILED: 刪除被取消（' + $_.Exception.Message + '）' }
     } catch { $status = 'FAILED: ' + $_.Exception.Message }
     $log.Add([pscustomobject]@{ Source = $r.Source; Action = $r.Action; Final = $final; Status = $status; Reason = $r.Reason })
 }

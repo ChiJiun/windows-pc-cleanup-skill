@@ -55,6 +55,7 @@ A "<title>$(Enc $Title)</title><style>$css</style></head><body><main>"
 A "<h1>$(Enc $Title)</h1>"
 A ("<div class=""meta"">產生時間 {0}｜電腦 {1}｜工作階段開始 {2}｜skill v{3}</div>" -f (Enc (Get-Date).ToString('yyyy-MM-dd HH:mm')), (Enc $env:COMPUTERNAME), (Enc $(if ($baseline) { $baseline.createdAt } else { '未知' })), (Enc $script:PccVersion))
 if ($overview) { A ("<div class=""meta"">{0}｜{1}｜{2}｜記憶體 {3}</div>" -f (Enc $overview.os), (Enc $overview.model), (Enc $overview.cpu), (Enc (Sz $overview.ramTotalBytes))) }
+if ($baseline -and $baseline.PSObject.Properties['note'] -and $baseline.note) { A ("<p class=""note"">起始值說明：{0}</p>" -f (Enc $baseline.note)) }
 
 # ---- 摘要 ----
 A '<h2>一、摘要</h2><div class="grid">'

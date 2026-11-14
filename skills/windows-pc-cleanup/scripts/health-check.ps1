@@ -16,13 +16,15 @@ $uptimeH = [math]::Round(((Get-Date) - $os.LastBootUpTime).TotalHours, 1)
 $n = [Environment]::ProcessorCount
 $cpu = $null
 try {
-    $c = Get-Counter '\Process(*)\% Processor Time' -SampleInterval 2 -MaxSamples $CpuSamples -ErrorAction Stop
-    $byProc = $c.CounterSamples | Where-Object { $_.InstanceName -notin '_total', 'idle' } |
+    # 取樣期間有程序結束時，Get-Counter 會回報「樣本無效」；略過這些樣本，不要整個中止
+    $c = Get-Counter '\Process(*)\% Processor Time' -SampleInterval 2 -MaxSamples $CpuSamples -ErrorAction SilentlyContinue
+    if (-not $c) { throw '效能計數器沒有回傳任何樣本（可能是計數器被停用或名稱被在地化）' }
+    $byProc = $c.CounterSamples | Where-Object { $_.Status -eq 0 -and $_.InstanceName -notin '_total', 'idle' } |
         Group-Object { $_.InstanceName -replace '#\d+$', '' } | ForEach-Object {
             [pscustomobject]@{ Name = $_.Name; CpuPercent = [math]::Round((($_.Group | Measure-Object CookedValue -Sum).Sum) / $CpuSamples / $n, 1); Instances = [int]($_.Group.Count / $CpuSamples) }
         } | Sort-Object CpuPercent -Descending
-    $sys = Get-Counter '\Processor(_Total)\% Privileged Time', '\Processor(_Total)\% User Time', '\Processor(_Total)\% Interrupt Time' -SampleInterval 1 -MaxSamples 2 -ErrorAction Stop
-    $last = $sys[-1].CounterSamples
+    $sys = @(Get-Counter '\Processor(_Total)\% Privileged Time', '\Processor(_Total)\% User Time', '\Processor(_Total)\% Interrupt Time' -SampleInterval 1 -MaxSamples 2 -ErrorAction SilentlyContinue)
+    $last = if ($sys.Count) { $sys[-1].CounterSamples } else { @() }
     $cpu = [ordered]@{
         totalPercent = [math]::Round(($byProc | Measure-Object CpuPercent -Sum).Sum, 1)
         privilegedPercent = [math]::Round(($last | Where-Object Path -match 'privileged').CookedValue, 1)
@@ -56,7 +58,8 @@ $dup = @($all | Where-Object { $devNames -contains $_.Name -and $_.CommandLine }
     }
 })
 foreach ($d in $dup) {
-    Add-Finding 'warn' '程序' "同一個指令有 $($d.Count) 個程序在跑" "$($d.CommandLine)（最早 $($d.FirstStart) 啟動，共 $(Format-PccSize $d.WorkingSetBytes)）" '很可能是重複啟動後沒關的開發伺服器。先確認沒有人在用，再由使用者決定要不要結束。'
+    $exe = [System.IO.Path]::GetFileName((($d.CommandLine -replace '^"', '') -split '"| ')[0])
+    Add-Finding 'warn' '程序' "同一個指令有 $($d.Count) 個 $exe 程序在跑" "$($d.CommandLine)（最早 $($d.FirstStart) 啟動，共 $(Format-PccSize $d.WorkingSetBytes)）" '很可能是重複啟動後沒關的開發伺服器。先確認沒有人在用，再由使用者決定要不要結束。'
 }
 $oldConsoles = @($all | Where-Object { $_.Name -eq 'conhost.exe' -and $_.CreationDate -lt (Get-Date).AddDays(-1) }).Count
 

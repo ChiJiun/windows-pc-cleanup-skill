@@ -1,0 +1,4 @@
+# 工作階段資料與報告含本機路徑，不要提交
+PCCleanup/
+report.html
+*.log

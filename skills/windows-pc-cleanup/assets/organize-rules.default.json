@@ -1,0 +1,33 @@
+{
+  "_comment": "檔案整理規則。pattern 是不分大小寫的 .NET 正規表示式，比對檔名；topics 依順序比對，先符合者優先。可複製一份自訂後用 -RulesFile 指定。",
+  "documentType": "文件",
+  "otherType": "其他",
+  "archiveType": "壓縮檔",
+  "installerType": "安裝檔",
+  "fallbackTopic": "未分類",
+  "sensitiveTopic": "個人證件與機密",
+  "types": [
+    { "name": "圖片",   "extensions": ["jpg", "jpeg", "png", "gif", "webp", "heic", "svg", "bmp", "tif", "tiff"] },
+    { "name": "影音",   "extensions": ["mp4", "mov", "mkv", "avi", "mp3", "wav", "m4a", "flac"] },
+    { "name": "網頁",   "extensions": ["html", "htm", "mhtml"] },
+    { "name": "程式碼", "extensions": ["py", "js", "ts", "java", "c", "cpp", "h", "cs", "r", "sql", "ipynb", "sh", "bat", "ps1", "go", "rs", "drawio"] },
+    { "name": "資料檔", "extensions": ["csv", "tsv", "json", "jsonl", "xml", "ods", "parquet"] },
+    { "name": "文件",   "extensions": ["pdf", "doc", "docx", "ppt", "pptx", "xls", "xlsx", "txt", "md", "tex", "odt", "odp", "rtf", "epub"] },
+    { "name": "壓縮檔", "extensions": ["zip", "rar", "7z", "tar", "gz", "bz2", "xz"] },
+    { "name": "安裝檔", "extensions": ["exe", "msi", "msix", "appx", "appinstaller"] }
+  ],
+  "topics": [
+    { "name": "個人證件與機密", "pattern": "credential|recovery.?code|password|passwd|密碼|帳密|存摺|戶籍|身分證|身份證|護照|passport|學生證|健保卡|低收|bank.?statement|\\.pfx$|\\.p12$|\\.pem$|\\.key$|\\.env$" },
+    { "name": "證書與收據", "pattern": "^cert|certificate|ecertificate|invoice|receipt|發票|收據|交易確認書|證照|證書" },
+    { "name": "升學與求職", "pattern": "碩士|博士|碩博|甄試|推甄|研究所|推薦函|推薦信|履歷|resume|\\bcv\\b|自我介紹|面試|interview|實習|internship|成績單|成績證明|transcript|准考證|榜單|口試|offer" },
+    { "name": "獎助學金與行政", "pattern": "獎學金|助學金|scholarship|學雜費|抵免|輔系|雙主修|學程|選課|畢業|主計|課表|申請表|申請書|申請辦法|報名表|請假|休學|公文" },
+    { "name": "競賽與活動", "pattern": "競賽|比賽|黑客松|hackathon|competition|contest|\\bcup\\b|devfest|workshop|工作坊|研討會|conference|徵件|徵選" },
+    { "name": "研究與論文", "pattern": "論文|paper|thesis|研究計畫|專題研究|科技部|國科會|arxiv|^\\d{4}\\.\\d{4,5}|\\(\\d{4}\\)|journal|proceedings|survey" },
+    { "name": "課業", "pattern": "hw\\d|homework|作業|syllabus|課綱|課程|course|lecture|講義|handout|slides|ch\\s?\\d|chapter|module|期中|期末|midterm|final|quiz|exam|考試|考古|筆記|notes|lab\\d|實驗|report|報告|proposal|教材|教學" }
+  ],
+  "installers": { "recycle": true, "keepPattern": "vpn|globalprotect|憑證|certificate|ca\\.exe$" },
+  "duplicates": { "recycle": true },
+  "extractedArchives": { "recycle": true },
+  "subfolders": { "move": true, "target": "資料夾" },
+  "logFolder": "_整理紀錄"
+}

@@ -4,8 +4,8 @@
 //! - clear_folder／clean_old_files 只能處理最近一次 scan_cleanup_targets 列出、且標示可自動處理的資料夾。
 //! - clean_old_files 一定排除 Temp\claude（執行中的 AI 工具暫存）。
 //! - organize_apply 只接受目前工作階段內的計畫檔；organize_plan 不開放 -AllowUnsafeRoot。
-//! - organize_undo 只接受工作階段資料夾內的紀錄檔。計畫與紀錄的來源都必須在同一個資料夾，
-//!   搬移目的地必須在那個資料夾底下，確認視窗會顯示這個資料夾。
+//! - organize_undo 只接受工作階段資料夾內的紀錄檔。計畫與紀錄的來源都必須在同一個資料夾，搬移目的地必須在那個資料夾底下，
+//!   確認視窗會顯示這個資料夾；隔離資料夾與紀錄中要搬回的項目只能在整理資料夾或工作階段資料夾底下。
 
 use crate::confirm::{self, Origin};
 use crate::scripts::{self, PsArg, RunOutput};
@@ -79,7 +79,7 @@ pub fn specs() -> Vec<ToolSpec> {
         ToolSpec { name: "clear_folder", zh: "清空一個快取資料夾的內容（保留資料夾本身，直接刪除、不進資源回收筒）。path 必須是 scan_cleanup_targets 結果中 Action 為 clear-folder 的 RealPath。相關程式執行中時會中止。", en: "Empty a cache folder (keeps the folder; deletes directly, not to the Recycle Bin). path must be the RealPath of a scan_cleanup_targets item whose Action is clear-folder. Aborts if related apps are running.", schema: obj(json!({ "path": { "type": "string" }, "processNames": { "type": "array", "items": { "type": "string" } }, "apply": apply }), &["path"]) },
         ToolSpec { name: "clean_old_files", zh: "刪除資料夾中超過 N 天的舊檔（預設直接刪除；recycle=true 改送資源回收筒）。path 必須是 scan_cleanup_targets 結果中 Action 為 clean-old-files 的 RealPath。", en: "Delete files older than N days in a folder (deleted directly by default; recycle=true sends them to the Recycle Bin). path must be the RealPath of a scan_cleanup_targets item whose Action is clean-old-files.", schema: obj(json!({ "path": { "type": "string" }, "olderThanDays": { "type": "integer" }, "excludeTopLevel": { "type": "array", "items": { "type": "string" } }, "recycle": { "type": "boolean" }, "apply": apply }), &["path"]) },
         ToolSpec { name: "organize_plan", zh: "為一個資料夾（預設是下載資料夾）產生整理計畫：依類型與主題分類、找出重複檔與已解壓縮的壓縮檔。只產生計畫，不搬動任何檔案。系統與使用者根資料夾會被拒絕。", en: "Create an organization plan for a folder (Downloads by default): sort by type and topic, find duplicates and extracted archives. Only creates a plan; moves nothing. System and user root folders are refused.", schema: obj(json!({ "root": { "type": "string" } }), &[]) },
-        ToolSpec { name: "organize_apply", zh: "依整理計畫搬移檔案（plan 是 organize_plan 回傳的 planFile；省略時用目前工作階段最新的計畫）。要移除的項目送資源回收筒，或指定 quarantineDir 隔離。會留下還原腳本與紀錄。", en: "Move files according to an organization plan (plan = the planFile returned by organize_plan; defaults to the latest plan in this session). Items to remove go to the Recycle Bin, or to quarantineDir. Leaves an undo script and a log.", schema: obj(json!({ "plan": { "type": "string" }, "quarantineDir": { "type": "string" }, "apply": apply }), &[]) },
+        ToolSpec { name: "organize_apply", zh: "依整理計畫搬移檔案（plan 是 organize_plan 回傳的 planFile；省略時用目前工作階段最新的計畫）。要移除的項目送資源回收筒，或指定 quarantineDir 隔離（必須在整理資料夾底下，例如 <root>\\_quarantine）。會留下還原腳本與紀錄。", en: "Move files according to an organization plan (plan = the planFile returned by organize_plan; defaults to the latest plan in this session). Items to remove go to the Recycle Bin, or to quarantineDir (must be inside the organized folder, e.g. <root>\\_quarantine). Leaves an undo script and a log.", schema: obj(json!({ "plan": { "type": "string" }, "quarantineDir": { "type": "string" }, "apply": apply }), &[]) },
         ToolSpec { name: "organize_undo", zh: "依整理紀錄把搬過的檔案搬回原位。log 必須是工作階段資料夾內的 organize-log-*.csv（organize_apply 回傳的 logFile）。", en: "Move files back according to an organize log. log must be an organize-log-*.csv inside the sessions folder (the logFile returned by organize_apply).", schema: obj(json!({ "log": { "type": "string" }, "apply": apply }), &["log"]) },
         ToolSpec { name: "build_report", zh: "產生這個工作階段的 HTML 總整報告（清理成果、健檢、整理、待決定事項、溯源與還原方式）。", en: "Build the HTML report for this session (results, health, organization, pending items, traceability and undo).", schema: obj(json!({}), &[]) },
         ToolSpec { name: "log_action", zh: "記錄一筆動作到工作階段（例如使用者決定略過或待決定的項目），會出現在報告中。", en: "Record an action in the session (e.g. items the user skipped or left pending); it appears in the report.", schema: obj(json!({ "category": { "type": "string" }, "action": { "type": "string" }, "target": { "type": "string" }, "result": { "type": "string", "enum": ["done", "partial", "skipped", "failed", "pending"] }, "reversible": { "type": "string", "enum": ["yes", "recycle-bin", "undo-script", "reinstall", "no"] }, "note": { "type": "string" }, "bytesFreed": { "type": "integer" } }), &["category", "action"]) },
@@ -147,8 +147,11 @@ fn is_inside(child: &Path, parent: &Path) -> bool {
 }
 
 /// 必須是完整路徑，而且不能含 . 或 .. 這類相對路徑片段（避免字串比對被 ..\ 繞過）
+/// 也不能含控制字元（Windows 檔名本來就不允許，出現代表是想在確認視窗插入假說明）
 fn plain_abs(p: &Path) -> bool {
-    p.is_absolute() && !p.components().any(|c| matches!(c, Component::ParentDir | Component::CurDir))
+    p.is_absolute()
+        && !p.components().any(|c| matches!(c, Component::ParentDir | Component::CurDir))
+        && !p.to_string_lossy().chars().any(char::is_control)
 }
 
 fn row_str<'a>(r: &'a Value, k: &str) -> &'a str {
@@ -235,12 +238,37 @@ pub(crate) struct LogSummary {
 
 const BIN_MARKERS: [&str; 2] = ["(RecycleBin)", "(資源回收筒)"];
 
-/// 檢查整理紀錄：會被搬回去的位置（Source）都必須在同一個整理資料夾內
-pub(crate) fn summarize_log(rows: &[Value], zh: bool) -> Result<LogSummary, String> {
+/// 隔離資料夾只能放在整理資料夾底下或工作階段資料夾底下：
+/// 被隔離的多半是安裝檔，放到啟動資料夾、系統資料夾等位置可能在登入時被自動執行
+pub(crate) fn check_quarantine(q: &Path, root: &Path, sessions: Option<&Path>, zh: bool) -> Result<(), String> {
+    if plain_abs(q) && (is_inside(q, root) || sessions.is_some_and(|s| is_inside(q, s))) {
+        return Ok(());
+    }
+    Err(msg(
+        zh,
+        &format!("quarantineDir 必須是整理資料夾（{}）或工作階段資料夾底下的完整路徑，例如 {}\\_quarantine。", root.display(), root.display()),
+        &format!("quarantineDir must be an absolute path inside the organized folder ({}) or the sessions folder, e.g. {}\\_quarantine.", root.display(), root.display()),
+    ))
+}
+
+/// 檢查整理紀錄：會被搬回去的位置（Source）都必須在同一個整理資料夾內；
+/// 要搬回來的項目（Final）必須在整理資料夾或工作階段資料夾底下（也就是 organize_apply 允許的位置）
+pub(crate) fn summarize_log(rows: &[Value], sessions: Option<&Path>, zh: bool) -> Result<LogSummary, String> {
     let root = common_root(rows.iter().map(|r| row_str(r, "Source")).filter(|s| !s.is_empty()), zh)?;
     let ok = |r: &&Value| row_str(r, "Status") == "OK";
     let in_bin = rows.iter().filter(ok).filter(|r| BIN_MARKERS.contains(&row_str(r, "Final"))).count();
-    let restorable = rows.iter().filter(ok).filter(|r| !row_str(r, "Final").is_empty() && !BIN_MARKERS.contains(&row_str(r, "Final"))).count();
+    let mut restorable = 0;
+    for r in rows.iter().filter(ok).filter(|r| !row_str(r, "Final").is_empty() && !BIN_MARKERS.contains(&row_str(r, "Final"))) {
+        let f = Path::new(row_str(r, "Final"));
+        if !(plain_abs(f) && (is_inside(f, &root) || sessions.is_some_and(|s| is_inside(f, s)))) {
+            return Err(msg(
+                zh,
+                &format!("紀錄中要搬回的項目不在整理資料夾或工作階段資料夾內：{}", f.display()),
+                &format!("An item to move back is outside the organized folder and the sessions folder: {}", f.display()),
+            ));
+        }
+        restorable += 1;
+    }
     Ok(LogSummary { root, restorable, in_bin })
 }
 
@@ -376,7 +404,8 @@ pub fn run_tool(core: &Core, name: &str, args: &Value, origin: &Origin) -> Resul
             // 只接受本程式工作階段資料夾內的紀錄（organize_apply 一定會在工作階段留一份），
             // 避免下載來的或 AI 指定的任意 CSV 被拿來把檔案搬到任意位置
             let sroot = sessions_root();
-            if !canonical(&sroot).is_some_and(|r| is_inside(&lp, &r)) {
+            let csroot = canonical(&sroot);
+            if !csroot.as_ref().is_some_and(|r| is_inside(&lp, r)) {
                 return Err(msg(
                     zh,
                     &format!("只接受工作階段資料夾（{}）內的整理紀錄。整理資料夾裡的副本請直接執行同一個資料夾中的 organize-undo.ps1。", sroot.display()),
@@ -384,7 +413,7 @@ pub fn run_tool(core: &Core, name: &str, args: &Value, origin: &Origin) -> Resul
                 ));
             }
             let rows = read_csv(&lp).as_array().cloned().unwrap_or_default();
-            let sum = summarize_log(&rows, zh)?;
+            let sum = summarize_log(&rows, csroot.as_deref(), zh)?;
             let apply = arg_b(args, "apply");
             if apply
                 && !confirm::ask(
@@ -529,15 +558,13 @@ pub fn run_tool(core: &Core, name: &str, args: &Value, origin: &Origin) -> Resul
             if !plan.parent().is_some_and(|p| same_path(p, &csess)) || !fname.starts_with("organize-plan-") || !fname.ends_with(".csv") {
                 return Err(msg(zh, "只接受目前工作階段內的 organize-plan-*.csv。", "Only organize-plan-*.csv files in the current session are accepted."));
             }
-            let quarantine = arg_s(args, "quarantineDir");
-            if let Some(q) = &quarantine {
-                if !Path::new(q).is_absolute() {
-                    return Err(msg(zh, "quarantineDir 必須是完整路徑。", "quarantineDir must be an absolute path."));
-                }
-            }
             // 試跑也先檢查，讓 AI 在要求使用者確認前就知道計畫有問題
             let rows = read_csv(&plan).as_array().cloned().unwrap_or_default();
             let sum = summarize_plan(&rows, zh)?;
+            let quarantine = arg_s(args, "quarantineDir");
+            if let Some(q) = &quarantine {
+                check_quarantine(Path::new(q), &sum.root, canonical(&sessions_root()).as_deref(), zh)?;
+            }
             let apply = arg_b(args, "apply");
             if apply {
                 let where_ = match &quarantine {
@@ -677,19 +704,39 @@ mod tests {
                 { "Source": r"C:\U\a\Downloads\x.pdf", "Action": "Move", "Final": r"C:\U\a\Downloads\文件\x.pdf", "Status": "OK" },
                 { "Source": r"C:\U\a\Downloads\z.exe", "Action": "Recycle", "Final": "(RecycleBin)", "Status": "OK" },
                 { "Source": r"C:\U\a\Downloads\w.exe", "Action": "Recycle", "Final": "(資源回收筒)", "Status": "OK" },
-                { "Source": r"C:\U\a\Downloads\v.pdf", "Action": "Move", "Final": "", "Status": "FAILED: x" }
+                { "Source": r"C:\U\a\Downloads\v.pdf", "Action": "Move", "Final": "", "Status": "FAILED: x" },
+                { "Source": r"C:\U\a\Downloads\q.exe", "Action": "Recycle", "Final": r"C:\U\a\PCCleanup\s1\quarantine\q.exe", "Status": "OK" }
             ])),
+            Some(Path::new(r"C:\U\a\PCCleanup")),
             true,
         )
         .unwrap();
         assert!(same_path(&ok.root, Path::new(r"C:\U\a\Downloads")));
-        assert_eq!((ok.restorable, ok.in_bin), (1, 2));
+        assert_eq!((ok.restorable, ok.in_bin), (2, 2));
+        // 要搬回的項目（Final）在整理資料夾與工作階段資料夾之外 → 拒絕
+        let far = rows(json!([{ "Source": r"C:\U\a\Downloads\x.pdf", "Action": "Move", "Final": r"C:\Windows\System32\x.pdf", "Status": "OK" }]));
+        assert!(summarize_log(&far, Some(Path::new(r"C:\U\a\PCCleanup")), true).is_err());
+        let dotdot = rows(json!([{ "Source": r"C:\U\a\Downloads\x.pdf", "Action": "Move", "Final": r"C:\U\a\Downloads\..\Documents\x.pdf", "Status": "OK" }]));
+        assert!(summarize_log(&dotdot, None, true).is_err());
         // 來源（還原目的地）分散在不同資料夾的紀錄一律拒絕
         let evil = rows(json!([
             { "Source": r"C:\U\a\Downloads\x.pdf", "Action": "Move", "Final": r"C:\U\a\Downloads\文件\x.pdf", "Status": "OK" },
             { "Source": r"C:\U\a\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup\evil.exe", "Action": "Move", "Final": r"C:\U\a\Downloads\evil.exe", "Status": "OK" }
         ]));
-        assert!(summarize_log(&evil, true).is_err());
+        assert!(summarize_log(&evil, None, true).is_err());
+    }
+
+    #[test]
+    fn quarantine_must_stay_inside_root_or_sessions() {
+        let (root, sess) = (Path::new(r"C:\U\a\Downloads"), Some(Path::new(r"C:\U\a\PCCleanup")));
+        assert!(check_quarantine(Path::new(r"C:\U\a\Downloads\_quarantine"), root, sess, true).is_ok());
+        assert!(check_quarantine(Path::new(r"C:\U\a\PCCleanup\q"), root, sess, true).is_ok());
+        assert!(check_quarantine(Path::new(r"C:\U\a\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup"), root, sess, true).is_err());
+        assert!(check_quarantine(Path::new(r"C:\U\a\Downloads"), root, sess, true).is_err());
+        assert!(check_quarantine(Path::new(r"C:\U\a\Downloads\..\Startup"), root, sess, true).is_err());
+        assert!(check_quarantine(Path::new(r"_quarantine"), root, sess, true).is_err());
+        assert!(check_quarantine(Path::new("C:\\U\\a\\Downloads\\_q\r\n\u{2714} 安全"), root, sess, true).is_err());
+        assert!(check_quarantine(Path::new(r"C:\U\a\PCCleanup\q"), root, None, true).is_err());
     }
 
     #[test]

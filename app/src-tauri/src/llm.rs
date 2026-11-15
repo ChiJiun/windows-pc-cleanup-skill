@@ -93,21 +93,52 @@ fn client() -> Result<reqwest::Client, String> {
 
 pub struct Redactor {
     profile: Regex,
+    users: Vec<Regex>,
     computer: Option<Regex>,
+}
+
+/// 常見的通用帳號名稱：直接整字遮蔽會把一般文字（例如 "User Temp folder"）一起換掉，
+/// 所以這些名稱只遮蔽出現在 \ 或 / 之後的情況（例如排程工作建立者 PC\USER）
+const GENERIC_USER_NAMES: [&str; 10] = ["user", "users", "admin", "administrator", "owner", "guest", "default", "public", "test", "home"];
+
+fn user_regex(name: &str) -> Option<Regex> {
+    let n = regex::escape(name);
+    if GENERIC_USER_NAMES.iter().any(|g| g.eq_ignore_ascii_case(name)) {
+        // ${1} 保留前面的分隔符號（含 JSON 跳脫的 \\）
+        Regex::new(&format!(r"(?i)(\\\\|\\|/){n}\b")).ok()
+    } else {
+        Regex::new(&format!(r"(?i)()\b{n}\b")).ok()
+    }
 }
 
 impl Redactor {
     pub fn new() -> Self {
+        let home = dirs::home_dir().and_then(|h| h.file_name().map(|n| n.to_string_lossy().into_owned()));
+        Self::with(std::env::var("USERNAME").ok().into_iter().chain(home).collect(), std::env::var("COMPUTERNAME").ok())
+    }
+
+    /// users：登入名稱與使用者資料夾名稱（兩者可能不同）；長度少於 3 的不處理，避免誤遮一般文字
+    fn with(users: Vec<String>, computer: Option<String>) -> Self {
         // 任何磁碟上的 X:\Users\<名稱>（含 JSON 跳脫的 \\ 與 /）
         let profile = Regex::new(r#"(?i)\b[A-Z]:(\\\\|\\|/)Users(\\\\|\\|/)[^\\/"\r\n\t<>|]+"#).expect("valid regex");
-        let computer = std::env::var("COMPUTERNAME")
-            .ok()
-            .filter(|c| c.len() >= 3)
+        let mut names: Vec<String> = Vec::new();
+        for u in users.into_iter().map(|u| u.trim().to_string()).filter(|u| u.chars().count() >= 3) {
+            if !names.iter().any(|x| x.eq_ignore_ascii_case(&u)) {
+                names.push(u);
+            }
+        }
+        let users = names.iter().filter_map(|u| user_regex(u)).collect();
+        let computer = computer
+            .filter(|c| c.chars().count() >= 3)
             .and_then(|c| Regex::new(&format!(r"(?i)\b{}\b", regex::escape(&c))).ok());
-        Redactor { profile, computer }
+        Redactor { profile, users, computer }
     }
+
     pub fn apply(&self, s: &str) -> String {
         let mut out = self.profile.replace_all(s, "%USERPROFILE%").into_owned();
+        for u in &self.users {
+            out = u.replace_all(&out, "${1}<user>").into_owned();
+        }
         if let Some(c) = &self.computer {
             out = c.replace_all(&out, "<computer>").into_owned();
         }
@@ -333,6 +364,26 @@ mod tests {
         assert_eq!(r.apply(r"C:\Users\alice\Downloads\a.pdf"), r"%USERPROFILE%\Downloads\a.pdf");
         assert_eq!(r.apply(r#"{"p":"D:\\Users\\bob\\x"}"#), r#"{"p":"%USERPROFILE%\\x"}"#);
         assert_eq!(r.apply("User Temp folder"), "User Temp folder");
+    }
+
+    #[test]
+    fn redacts_bare_user_and_computer_names() {
+        let r = Redactor::with(vec!["alice".into(), "Alice".into(), "al".into()], Some("DESKTOP-AB12".into()));
+        // 排程工作建立者 <電腦>\<使用者>
+        assert_eq!(r.apply(r"Author: DESKTOP-AB12\alice"), r"Author: <computer>\<user>");
+        assert_eq!(r.apply(r#"{"Author":"DESKTOP-AB12\\ALICE"}"#), r#"{"Author":"<computer>\\<user>"}"#);
+        assert_eq!(r.apply("owner alice@example.com"), "owner <user>@example.com");
+        // 只遮整個字，不動包含它的其他字；長度少於 3 的名稱不處理
+        assert_eq!(r.apply("malice palace al"), "malice palace al");
+    }
+
+    #[test]
+    fn generic_user_names_only_after_separator() {
+        let r = Redactor::with(vec!["USER".into()], None);
+        assert_eq!(r.apply(r"Author: PC\USER"), r"Author: PC\<user>");
+        assert_eq!(r.apply(r#"{"a":"PC\\User"}"#), r#"{"a":"PC\\<user>"}"#);
+        assert_eq!(r.apply("User Temp folder"), "User Temp folder");
+        assert_eq!(r.apply(r"C:\Users\USER\Downloads"), r"%USERPROFILE%\Downloads");
     }
 
     #[test]

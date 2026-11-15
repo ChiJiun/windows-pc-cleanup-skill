@@ -16,6 +16,21 @@ fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
+/// 會改變文字顯示方式的 bidi 控制字元與行分隔字元
+fn is_layout_char(c: char) -> bool {
+    matches!(c, '\u{200E}' | '\u{200F}' | '\u{061C}' | '\u{2028}' | '\u{2029}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
+}
+
+/// 標題與每一行細節都可能含有呼叫端（AI／MCP）或檔案內容提供的文字，一律變成單行：
+/// 換行等控制字元換成空白、bidi 控制字元換成「?」，避免插入看起來像正式說明的假段落，或讓路徑反向顯示。
+/// 說明文字（warning）是程式內的固定字串，不處理。
+pub(crate) fn one_line(s: &str) -> String {
+    s.chars()
+        .map(|c| if c.is_control() { ' ' } else if is_layout_char(c) { '?' } else { c })
+        .take(400)
+        .collect()
+}
+
 pub fn ask(origin: &Origin, zh: bool, action: &str, details: &[String], warning: &str) -> bool {
     let mut body = String::new();
     if matches!(origin, Origin::Mcp) {
@@ -25,11 +40,10 @@ pub fn ask(origin: &Origin, zh: bool, action: &str, details: &[String], warning:
             "This request comes from an external AI client (MCP).\n\n"
         });
     }
-    body.push_str(action);
+    body.push_str(&one_line(action));
     body.push_str("\n\n");
     for d in details {
-        let line: String = d.chars().take(400).collect();
-        body.push_str(&line);
+        body.push_str(&one_line(d));
         body.push('\n');
     }
     if !warning.is_empty() {
@@ -52,4 +66,18 @@ pub fn ask(origin: &Origin, zh: bool, action: &str, details: &[String], warning:
     // SAFETY：兩個字串都以 0 結尾，並在呼叫期間保持存活
     let r = unsafe { MessageBoxW(hwnd, b.as_ptr(), t.as_ptr(), style) };
     r == IDOK
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn caller_text_becomes_one_line() {
+        assert_eq!(one_line("a\r\nb\tc"), "a  b c");
+        assert_eq!(one_line("x\u{202E}gpj.exe"), "x?gpj.exe");
+        assert_eq!(one_line("p\u{2066}q\u{2028}r"), "p?q?r");
+        assert_eq!(one_line(&"字".repeat(500)).chars().count(), 400);
+        assert_eq!(one_line(r"C:\Users\a\Downloads"), r"C:\Users\a\Downloads");
+    }
 }

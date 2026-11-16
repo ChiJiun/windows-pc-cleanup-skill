@@ -65,7 +65,8 @@ function Get-Topic([string]$name) {
     return $rules.fallbackTopic
 }
 
-$reserved = @($rules.types | ForEach-Object { $_.name }) + @($rules.otherType, $rules.subfolders.target, $rules.logFolder)
+# _quarantine 是桌面版建議的隔離資料夾名稱（<root>\_quarantine），搬走的話前一次的還原會找不到隔離的項目
+$reserved = @($rules.types | ForEach-Object { $_.name }) + @($rules.otherType, $rules.subfolders.target, $rules.logFolder, '_quarantine')
 # 每種語言的內建規則都要保留，避免換語言重新整理時，把另一種語言的分類資料夾與還原紀錄整批搬走
 foreach ($rf in Get-ChildItem -LiteralPath (Join-Path $PSScriptRoot '..\assets') -Filter 'organize-rules*.json' -ErrorAction SilentlyContinue) {
     $r2 = Read-PccJson $rf.FullName

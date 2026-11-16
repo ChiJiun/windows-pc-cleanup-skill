@@ -90,7 +90,10 @@ export function ConnectCard({ settings, onApplied, onKeyChanged }: Props) {
   async function applyLocal(server: LocalServer, model: string) {
     if (!settings) return;
     setError(null);
-    const next: Settings = { ...settings, provider: server.provider, model, baseUrl: "" };
+    // 以已儲存的設定為基礎（設定頁上尚未儲存的草稿不會被一起存進去）；
+    // 原本就是同一個供應商時保留自訂的位址（例如另一台電腦上的 Ollama），換供應商時才改回預設位址
+    const baseUrl = settings.provider === server.provider ? settings.baseUrl : "";
+    const next: Settings = { ...settings, provider: server.provider, model, baseUrl };
     try {
       await api.saveSettings(next);
       onApplied(next);
@@ -121,7 +124,7 @@ export function ConnectCard({ settings, onApplied, onKeyChanged }: Props) {
       <p className="small">{t("connect.or.desc")}</p>
       <div className="actions">
         <button type="button" className="btn-primary" onClick={openrouterLogin} disabled={orBusy}>
-          {t("connect.or.button")}
+          {orHasKey ? t("connect.or.relogin") : t("connect.or.button")}
         </button>
         {orBusy && (
           <>
@@ -132,6 +135,7 @@ export function ConnectCard({ settings, onApplied, onKeyChanged }: Props) {
           </>
         )}
       </div>
+      {orHasKey && !orBusy && <p className="muted small">{t("connect.or.replaceHint")}</p>}
 
       <h3>
         {t("connect.cd.title")} {cdLabel && <span className={`pill ${cdLabel.cls}`}>{cdLabel.text}</span>}

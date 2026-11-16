@@ -198,11 +198,16 @@ pub(crate) fn classify_callback(params: &[(String, String)], expected_state: &st
 
 /// 同時等待中的連線上限；滿了就關掉最舊的那條，讓新連線（例如真正的 callback）有位置
 const MAX_PENDING_CONNECTIONS: usize = 16;
-/// 每輪最多接受的新連線數；本機程式持續大量建立連線時，迴圈仍會回頭檢查取消與逾時
-const MAX_ACCEPTS_PER_ROUND: usize = 32;
-/// 一條連線從接受到送完請求第一行的時間上限；瀏覽器的 callback 會立刻送出請求，閒置連線超過就關掉
+/// 每個 listener 每輪最多接受的新連線數；本機程式持續大量建立連線時，迴圈仍會回頭檢查取消與逾時，
+/// 而且 127.0.0.1 與 ::1 各自有額度，其中一個被灌爆時另一個仍輪得到
+const MAX_ACCEPTS_PER_LISTENER: usize = 32;
+/// 一條連線從接受到送完請求標頭的時間上限；瀏覽器的 callback 會立刻送出請求，閒置連線超過就關掉
 const CONNECTION_READ_TIMEOUT: Duration = Duration::from_secs(2);
+/// 判讀請求時最多保留的位元組數（只需要第一行，但要容得下一般大小的標頭，例如 localhost 共用的 cookie）
 const MAX_REQUEST_BYTES: usize = 8192;
+/// 回應前最多再讀掉（丟棄）的位元組數。Windows 關閉「還有沒讀完的資料」的連線時會送 RST，
+/// 瀏覽器會顯示連線重設而看不到結果頁，所以回應前要把已送達的資料讀完
+const MAX_DRAIN_BYTES: usize = 64 * 1024;
 const POLL_INTERVAL: Duration = Duration::from_millis(20);
 
 /// 一條還在等請求內容的連線（非阻塞）
@@ -213,9 +218,9 @@ struct PendingConn {
 }
 
 enum ConnPoll {
-    /// 還沒收到完整的請求第一行，繼續等
+    /// 還沒收到完整的請求標頭，繼續等
     Waiting,
-    /// 已收到請求第一行（或對方關閉連線），可以判讀
+    /// 已收到完整的標頭（或達到上限、對方關閉連線），可以判讀
     Ready,
     /// 讀取錯誤，直接關掉
     Failed,
@@ -223,13 +228,14 @@ enum ConnPoll {
 
 /// 非阻塞地讀出目前已到的資料；不會等待，所以閒置連線不會擋住其他連線
 fn poll_conn(c: &mut PendingConn) -> ConnPoll {
-    let mut tmp = [0u8; 2048];
+    let mut tmp = [0u8; 4096];
     loop {
-        match c.stream.read(&mut tmp) {
+        let room = (MAX_REQUEST_BYTES - c.buf.len()).min(tmp.len());
+        match c.stream.read(&mut tmp[..room]) {
             Ok(0) => return ConnPoll::Ready,
             Ok(n) => {
                 c.buf.extend_from_slice(&tmp[..n]);
-                if c.buf.windows(2).any(|w| w == b"\r\n") || c.buf.len() >= MAX_REQUEST_BYTES {
+                if c.buf.windows(4).any(|w| w == b"\r\n\r\n") || c.buf.len() >= MAX_REQUEST_BYTES {
                     return ConnPoll::Ready;
                 }
             }
@@ -240,9 +246,24 @@ fn poll_conn(c: &mut PendingConn) -> ConnPoll {
     }
 }
 
+/// 把已送達、還沒讀的資料讀掉（非阻塞，有上限），避免關閉連線時送出 RST
+fn drain(s: &mut TcpStream) {
+    let mut tmp = [0u8; 4096];
+    let mut total = 0;
+    while total < MAX_DRAIN_BYTES {
+        match s.read(&mut tmp) {
+            Ok(0) => return,
+            Ok(n) => total += n,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(_) => return,
+        }
+    }
+}
+
 /// 判讀已收到的請求並回應
 fn finish_conn(c: PendingConn, expected_state: &str, zh: bool) -> CallbackResult {
     let mut s = c.stream;
+    drain(&mut s);
     // 回應只有幾百 bytes，一般會立刻寫完；加上逾時，避免對方不讀資料時卡住
     let _ = s.set_nonblocking(false);
     let _ = s.set_write_timeout(Some(Duration::from_secs(1)));
@@ -254,6 +275,19 @@ fn finish_conn(c: PendingConn, expected_state: &str, zh: bool) -> CallbackResult
     let r = classify_callback(&params, expected_state);
     respond(s, matches!(r, CallbackResult::Code(_)), zh);
     r
+}
+
+/// 從一個 listener 接受目前排隊中的連線，最多 max 條（其餘留到下一輪）
+fn accept_batch(l: &TcpListener, max: usize) -> Vec<TcpStream> {
+    let mut out = Vec::new();
+    while out.len() < max {
+        match l.accept() {
+            Ok((s, _)) => out.push(s),
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(_) => break,
+        }
+    }
+    out
 }
 
 /// 等瀏覽器帶授權碼回來（最多 5 分鐘，可取消）。state 不符的請求一律忽略，避免其他網頁送假的授權碼。
@@ -279,11 +313,8 @@ pub fn wait_for_code(p: &PendingLogin, zh: bool) -> Result<String, String> {
         if Instant::now() > deadline {
             return Err(msg(zh, "等候登入逾時（5 分鐘），請重新嘗試。", "Timed out waiting for sign-in (5 minutes). Please try again."));
         }
-        let mut accepted = 0;
         for l in &p.listeners {
-            while accepted < MAX_ACCEPTS_PER_ROUND {
-                let Ok((s, _)) = l.accept() else { break };
-                accepted += 1;
+            for s in accept_batch(l, MAX_ACCEPTS_PER_LISTENER) {
                 if s.set_nonblocking(true).is_err() {
                     continue;
                 }
@@ -537,7 +568,14 @@ fn backup_path(path: &Path, n: u32) -> PathBuf {
 }
 
 /// 寫備份，絕不覆寫已有的檔案：preferred 已存在時改用新的時間與流水號。回傳實際寫入的路徑。
-fn write_backup(path: &Path, preferred: &Path, bytes: &[u8]) -> Result<PathBuf, String> {
+fn write_backup(path: &Path, preferred: &Path, bytes: &[u8], zh: bool) -> Result<PathBuf, String> {
+    let failed = |e: &dyn std::fmt::Display| {
+        msg(
+            zh,
+            &format!("無法建立設定檔的備份（{e}），為了安全沒有修改設定檔：{}", path.display()),
+            &format!("Could not back up the settings file ({e}); it was left unchanged to be safe: {}", path.display()),
+        )
+    };
     let mut target = preferred.to_path_buf();
     for n in 1..=100 {
         match std::fs::OpenOptions::new().write(true).create_new(true).open(&target) {
@@ -545,15 +583,15 @@ fn write_backup(path: &Path, preferred: &Path, bytes: &[u8]) -> Result<PathBuf, 
                 if let Err(e) = f.write_all(bytes).and_then(|_| f.sync_all()) {
                     drop(f);
                     let _ = std::fs::remove_file(&target);
-                    return Err(e.to_string());
+                    return Err(failed(&e));
                 }
                 return Ok(target);
             }
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => target = backup_path(path, n),
-            Err(e) => return Err(e.to_string()),
+            Err(e) => return Err(failed(&e)),
         }
     }
-    Err("could not create a unique backup file name".into())
+    Err(failed(&msg(zh, "找不到可用的備份檔名", "no unused backup file name")))
 }
 
 /// 使用者按確定之後的步驟：確認期間檔案若被改過就不寫入；否則先備份原檔（有的話），再寫入新設定。
@@ -567,7 +605,7 @@ fn apply_confirmed(path: &Path, snapshot: &Option<Vec<u8>>, backup: &Path, cfg: 
     }
     if let Some(bytes) = snapshot {
         // 備份的內容就是剛剛比對過、要被改寫的那一版
-        write_backup(path, backup, bytes)?;
+        write_backup(path, backup, bytes, zh)?;
     } else if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     }
@@ -585,13 +623,16 @@ pub struct LocalServer {
     pub base_url: String,
     /// 這是使用者在設定裡填的自訂位址（不是預設的 localhost）；套用這裡的模型時要沿用這個位址
     pub custom: bool,
+    /// AI 助理不能使用這個位址（非本機的 http，見 llm::base_url_allowed），所以沒有偵測
+    pub unsupported: bool,
     pub running: bool,
     pub models: Vec<String>,
 }
 
 const LOCAL_DEFAULTS: [(&str, &str, &str); 2] = [("ollama", "Ollama", "http://localhost:11434/v1"), ("lmstudio", "LM Studio", "http://localhost:1234/v1")];
 
-/// 要偵測的位址：每個地端供應商的預設位址；目前設定是該供應商且填了不同的自訂位址時，再加上那個自訂位址
+/// 要偵測的位址 (供應商, 名稱, 位址, 是否自訂)：每個地端供應商的預設位址；
+/// 目前設定是該供應商且填了不同的自訂位址時，再加上那個自訂位址
 pub(crate) fn local_targets(provider: &str, base_url: &str) -> Vec<(&'static str, &'static str, String, bool)> {
     let custom = base_url.trim().trim_end_matches('/');
     let mut out = Vec::new();
@@ -608,6 +649,11 @@ pub async fn detect_local(provider: &str, base_url: &str) -> Vec<LocalServer> {
     let Ok(c) = reqwest::Client::builder().timeout(Duration::from_millis(1500)).build() else { return vec![] };
     let mut out = Vec::new();
     for (provider, label, base, custom) in local_targets(provider, base_url) {
+        // 與對話端同一條規則：非本機的 http 不能用，就不偵測，只在畫面上說明
+        if !crate::llm::base_url_allowed(&base) {
+            out.push(LocalServer { provider, label, base_url: base, custom, unsupported: true, running: false, models: vec![] });
+            continue;
+        }
         let models = match c.get(format!("{base}/models")).send().await {
             Ok(r) if r.status().is_success() => r.json::<Value>().await.ok().map(|v| {
                 let mut ids: Vec<String> = v.get("data").and_then(|d| d.as_array()).into_iter().flatten().filter_map(|m| m.get("id").and_then(|i| i.as_str()).map(String::from)).collect();
@@ -616,7 +662,7 @@ pub async fn detect_local(provider: &str, base_url: &str) -> Vec<LocalServer> {
             }),
             _ => None,
         };
-        out.push(LocalServer { provider, label, base_url: base, custom, running: models.is_some(), models: models.unwrap_or_default() });
+        out.push(LocalServer { provider, label, base_url: base, custom, unsupported: false, running: models.is_some(), models: models.unwrap_or_default() });
     }
     out
 }
@@ -658,8 +704,7 @@ mod tests {
 
     #[test]
     fn callback_requires_matching_state() {
-        let _l = LOGIN_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let _g = LoginGuard::acquire(true).unwrap();
+        let _t = login_test();
         let p = start_login().unwrap();
         let port = p.listeners[0].local_addr().unwrap().port();
         let state = p.state.clone();
@@ -711,6 +756,104 @@ mod tests {
 
     /// 登入流程用到全域的 RUNNING／CANCEL，相關測試要依序執行
     static LOGIN_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    /// 看門狗：登入測試超過這個時間就自動取消，退化時快速失敗，不會卡到 5 分鐘逾時
+    const WATCHDOG: Duration = Duration::from_secs(5);
+
+    /// 時間到就呼叫 cancel_login；提前被 drop（測試結束）時什麼都不做
+    struct Watchdog(#[allow(dead_code)] std::sync::mpsc::Sender<()>);
+    impl Watchdog {
+        fn arm(after: Duration) -> Self {
+            let (tx, rx) = std::sync::mpsc::channel::<()>();
+            std::thread::spawn(move || {
+                if let Err(std::sync::mpsc::RecvTimeoutError::Timeout) = rx.recv_timeout(after) {
+                    cancel_login();
+                }
+            });
+            Watchdog(tx)
+        }
+    }
+
+    /// 欄位依宣告順序釋放：先解除看門狗，再結束登入流程，最後放開測試鎖
+    struct LoginTest {
+        _watchdog: Watchdog,
+        _guard: LoginGuard,
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+
+    fn login_test() -> LoginTest {
+        let lock = LOGIN_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // acquire 會把 CANCEL 歸零，所以看門狗要在之後才啟動
+        let guard = LoginGuard::acquire(true).unwrap();
+        LoginTest { _watchdog: Watchdog::arm(WATCHDOG), _guard: guard, _lock: lock }
+    }
+
+    #[test]
+    fn large_headers_still_get_the_result_page() {
+        // localhost 的 cookie 不分 port 共用，callback 請求常帶好幾 KB 的 Cookie；
+        // 沒讀完的資料會讓 Windows 送 RST，瀏覽器就看不到「已連結」頁面
+        for cookie_len in [500, 4000, 7000, 12000] {
+            let _t = login_test();
+            let p = start_login().unwrap();
+            let port = p.listeners[0].local_addr().unwrap().port();
+            let state = p.state.clone();
+            let sender = std::thread::spawn(move || {
+                let cookie = "c".repeat(cookie_len);
+                let req = format!("GET /callback?code=ok&state={state} HTTP/1.1\r\nHost: localhost:{port}\r\nCookie: a={cookie}\r\nAccept: text/html\r\n\r\n");
+                // 用戶端稍後才讀回應，模擬瀏覽器
+                let mut s = TcpStream::connect(("127.0.0.1", port))?;
+                s.write_all(req.as_bytes())?;
+                std::thread::sleep(Duration::from_millis(200));
+                let mut resp = String::new();
+                s.read_to_string(&mut resp)?;
+                Ok::<String, std::io::Error>(resp)
+            });
+            assert_eq!(wait_for_code(&p, true).unwrap(), "ok");
+            let resp = sender.join().unwrap().unwrap_or_else(|e| panic!("Cookie {cookie_len} bytes：{e}"));
+            assert!(resp.contains("已連結 OpenRouter"), "Cookie {cookie_len} bytes：{resp}");
+        }
+    }
+
+    #[test]
+    fn slow_callback_survives_full_queue() {
+        let _t = login_test();
+        let p = start_login().unwrap();
+        let port = p.listeners[0].local_addr().unwrap().port();
+        let state = p.state.clone();
+        let sender = std::thread::spawn(move || {
+            // 先用閒置連線把等待佇列塞滿
+            let idle: Vec<TcpStream> = (0..MAX_PENDING_CONNECTIONS).map(|_| TcpStream::connect(("127.0.0.1", port)).unwrap()).collect();
+            std::thread::sleep(Duration::from_millis(200));
+            // callback 連上後過一下才送資料：它會進入已滿的等待佇列，應該擠掉最舊的閒置連線，而不是自己被關掉
+            let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
+            std::thread::sleep(Duration::from_millis(150));
+            let r = write!(s, "GET /callback?code=ok&state={state} HTTP/1.1\r\nHost: localhost\r\n\r\n").and_then(|_| {
+                let mut resp = String::new();
+                s.read_to_string(&mut resp).map(|_| resp)
+            });
+            drop(idle);
+            r
+        });
+        let t0 = Instant::now();
+        let got = wait_for_code(&p, true);
+        let resp = sender.join().unwrap();
+        assert_eq!(got.unwrap(), "ok", "等了 {:?}", t0.elapsed());
+        assert!(resp.unwrap().contains("已連結 OpenRouter"));
+    }
+
+    #[test]
+    fn accept_batch_respects_limit() {
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        l.set_nonblocking(true).unwrap();
+        let port = l.local_addr().unwrap().port();
+        let total = MAX_ACCEPTS_PER_LISTENER + 8;
+        let clients: Vec<TcpStream> = (0..total).map(|_| TcpStream::connect(("127.0.0.1", port)).unwrap()).collect();
+        std::thread::sleep(Duration::from_millis(100));
+        assert_eq!(accept_batch(&l, MAX_ACCEPTS_PER_LISTENER).len(), MAX_ACCEPTS_PER_LISTENER);
+        // 剩下的留到下一輪
+        assert_eq!(accept_batch(&l, MAX_ACCEPTS_PER_LISTENER).len(), 8);
+        assert!(accept_batch(&l, MAX_ACCEPTS_PER_LISTENER).is_empty());
+        drop(clients);
+    }
 
     fn send(port: u16, path: &str) -> String {
         let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
@@ -722,8 +865,7 @@ mod tests {
 
     #[test]
     fn idle_connection_does_not_block_callback() {
-        let _l = LOGIN_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let _g = LoginGuard::acquire(true).unwrap();
+        let _t = login_test();
         let p = start_login().unwrap();
         let port = p.listeners[0].local_addr().unwrap().port();
         let state = p.state.clone();
@@ -742,8 +884,7 @@ mod tests {
 
     #[test]
     fn denied_callback_ends_login() {
-        let _l = LOGIN_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let _g = LoginGuard::acquire(true).unwrap();
+        let _t = login_test();
         let p = start_login().unwrap();
         let port = p.listeners[0].local_addr().unwrap().port();
         let sender = std::thread::spawn(move || send(port, "/callback?error=access_denied"));
@@ -755,8 +896,7 @@ mod tests {
 
     #[test]
     fn full_idle_connections_do_not_block_callback() {
-        let _l = LOGIN_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let _g = LoginGuard::acquire(true).unwrap();
+        let _t = login_test();
         let p = start_login().unwrap();
         let port = p.listeners[0].local_addr().unwrap().port();
         let state = p.state.clone();
@@ -776,8 +916,7 @@ mod tests {
 
     #[test]
     fn connection_flood_does_not_block_cancel() {
-        let _l = LOGIN_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let _g = LoginGuard::acquire(true).unwrap();
+        let _t = login_test();
         let p = start_login().unwrap();
         let port = p.listeners[0].local_addr().unwrap().port();
         let stop = std::sync::Arc::new(AtomicBool::new(false));
@@ -897,7 +1036,7 @@ mod tests {
         let preferred = backup_path(&path, 0);
         // 同一個檔名已經有備份（例如同一毫秒內改寫兩次）
         std::fs::write(&preferred, b"first").unwrap();
-        let second = write_backup(&path, &preferred, b"second").unwrap();
+        let second = write_backup(&path, &preferred, b"second", true).unwrap();
         assert_ne!(second, preferred);
         assert_eq!(std::fs::read(&preferred).unwrap(), b"first");
         assert_eq!(std::fs::read(&second).unwrap(), b"second");
@@ -918,6 +1057,49 @@ mod tests {
         drop(lock);
         assert_eq!(read_raw(&path).unwrap().unwrap(), b"{}");
         assert!(read_raw(&t.0.join("missing.json")).unwrap().is_none());
+    }
+
+    #[test]
+    fn apply_confirmed_refuses_when_file_deleted_during_confirmation() {
+        let t = TempDir::new();
+        let path = t.0.join(CONFIG_FILE);
+        let original = br#"{"globalShortcut":"Ctrl+Space"}"#;
+        std::fs::write(&path, original).unwrap();
+        let snapshot = read_raw(&path).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        let err = apply_confirmed(&path, &snapshot, &backup_path(&path, 0), &added_cfg(original), true).unwrap_err();
+        assert!(err.contains("被修改"), "{err}");
+        // 不會用舊內容把檔案建回來，也不會產生備份
+        assert!(!path.exists());
+        assert!(backups_in(&t.0).is_empty());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn apply_confirmed_refuses_when_file_unreadable() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let t = TempDir::new();
+        let path = t.0.join(CONFIG_FILE);
+        let original = br#"{"globalShortcut":"Ctrl+Space"}"#;
+        std::fs::write(&path, original).unwrap();
+        let snapshot = read_raw(&path).unwrap();
+        // 按確定的當下檔案被其他程式以不共用方式開著：讀不到就不能確定沒被改過，所以不寫入
+        let lock = std::fs::OpenOptions::new().read(true).write(true).share_mode(0).open(&path).unwrap();
+        let err = apply_confirmed(&path, &snapshot, &backup_path(&path, 0), &added_cfg(original), true).unwrap_err();
+        drop(lock);
+        assert!(err.contains("被修改"), "{err}");
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+        assert!(backups_in(&t.0).is_empty());
+    }
+
+    #[test]
+    fn non_local_http_is_not_usable_for_chat() {
+        // detect_local 用這條規則決定自訂位址要不要偵測（與對話端相同）
+        assert!(crate::llm::base_url_allowed("http://localhost:11434/v1"));
+        assert!(crate::llm::base_url_allowed("http://127.0.0.1:1234/v1"));
+        assert!(crate::llm::base_url_allowed("https://10.0.0.5:11434/v1"));
+        assert!(!crate::llm::base_url_allowed("http://10.0.0.5:11434/v1"));
+        assert!(!crate::llm::base_url_allowed("http://localhost:1@evil.example/v1"));
     }
 
     #[test]

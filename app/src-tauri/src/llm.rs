@@ -71,13 +71,18 @@ fn is_local_url(u: &str) -> bool {
     host.trim_start_matches('[').trim_end_matches(']').parse::<std::net::IpAddr>().is_ok_and(|ip| ip.is_loopback())
 }
 
+/// AI 助理可以連的 API 網址：https，或本機的 http（地端模型偵測也用同一條規則）
+pub(crate) fn base_url_allowed(base: &str) -> bool {
+    base.starts_with("https://") || (base.starts_with("http://") && is_local_url(base))
+}
+
 fn endpoint(s: &Settings, key: Option<String>, zh: bool) -> Result<Endpoint, String> {
     let p = presets().into_iter().find(|p| p.id == s.provider).ok_or("unknown provider")?;
     let base = if s.base_url.is_empty() { p.default_base_url.to_string() } else { s.base_url.clone() };
     if base.is_empty() {
         return Err(if zh { "請在設定中填入 API 網址。" } else { "Set the API URL in Settings." }.into());
     }
-    if !(base.starts_with("https://") || (base.starts_with("http://") && is_local_url(&base))) {
+    if !base_url_allowed(&base) {
         return Err(if zh { "API 網址必須是 https，或是本機的 http（localhost）。" } else { "The API URL must use https, or http on localhost." }.into());
     }
     if p.needs_key && key.is_none() {

@@ -98,7 +98,29 @@ export interface ReportData {
   reportPath: string;
 }
 
-export type ProviderId = "anthropic" | "openai" | "gemini" | "xai" | "ollama" | "lmstudio" | "custom";
+export type ProviderId = "anthropic" | "openai" | "gemini" | "xai" | "openrouter" | "ollama" | "lmstudio" | "custom";
+
+/** Claude Desktop 的 MCP 連結狀態 */
+export interface ClaudeDesktopStatus {
+  /** 找得到 Claude Desktop 的設定資料夾 */
+  found: boolean;
+  configPath: string;
+  /** 設定檔裡已經有本程式的項目 */
+  connected: boolean;
+  /** 已有的項目指向目前這個 exe（exe 被移動後會變成 false，需要重新連結） */
+  pointsToThisExe: boolean;
+  /** 設定檔不是合法 JSON，不會修改它 */
+  invalidJson: boolean;
+}
+
+/** 偵測到的地端模型服務 */
+export interface LocalServer {
+  provider: "ollama" | "lmstudio";
+  label: string;
+  baseUrl: string;
+  running: boolean;
+  models: string[];
+}
 
 export interface ProviderPreset {
   id: ProviderId;
@@ -155,4 +177,13 @@ export const api = {
   openUrl: (url: string) => invoke<void>("open_url", { url }),
   /** 給 Claude Desktop 等 MCP 用戶端的設定片段 */
   mcpConfig: () => invoke<string>("mcp_config"),
+  /** 開瀏覽器用 OpenRouter 登入，完成後 API key 存進認證管理員並切換到 OpenRouter。最多等 5 分鐘。 */
+  openrouterLogin: () => invoke<void>("openrouter_login"),
+  /** 取消進行中的 OpenRouter 登入 */
+  openrouterCancel: () => invoke<void>("openrouter_cancel"),
+  claudeDesktopStatus: () => invoke<ClaudeDesktopStatus>("claude_desktop_status"),
+  /** 加入（add = true）或移除 Claude Desktop 的 MCP 設定；會跳原生確認視窗，回傳 false 代表使用者取消 */
+  claudeDesktopConnect: (add: boolean) => invoke<boolean>("claude_desktop_connect", { add }),
+  /** 偵測 Ollama 與 LM Studio 是否在執行，以及已安裝的模型 */
+  detectLocalModels: () => invoke<LocalServer[]>("detect_local_models"),
 };

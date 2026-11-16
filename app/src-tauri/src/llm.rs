@@ -25,6 +25,8 @@ pub fn presets() -> Vec<Preset> {
         Preset { id: "openai", label: "OpenAI ChatGPT", needs_key: true, local: false, default_base_url: "https://api.openai.com/v1", default_model: "gpt-5" },
         Preset { id: "gemini", label: "Google Gemini", needs_key: true, local: false, default_base_url: "https://generativelanguage.googleapis.com/v1beta/openai", default_model: "gemini-2.5-flash" },
         Preset { id: "xai", label: "xAI Grok", needs_key: true, local: false, default_base_url: "https://api.x.ai/v1", default_model: "grok-4" },
+        // 一個帳號就能用多家模型；API key 可由設定頁的「用 OpenRouter 登入」自動取得（見 connect.rs）
+        Preset { id: "openrouter", label: "OpenRouter (Claude / GPT / Gemini / Grok)", needs_key: true, local: false, default_base_url: "https://openrouter.ai/api/v1", default_model: "openrouter/auto" },
         Preset { id: "ollama", label: "Ollama (local)", needs_key: false, local: true, default_base_url: "http://localhost:11434/v1", default_model: "qwen3:8b" },
         Preset { id: "lmstudio", label: "LM Studio (local)", needs_key: false, local: true, default_base_url: "http://localhost:1234/v1", default_model: "" },
         Preset { id: "custom", label: "OpenAI-compatible (custom)", needs_key: false, local: false, default_base_url: "", default_model: "" },

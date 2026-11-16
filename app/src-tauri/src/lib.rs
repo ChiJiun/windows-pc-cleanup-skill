@@ -1,6 +1,7 @@
 //! Tauri 桌面程式進入點與前端可呼叫的 command。合約見 app/src/api.ts。
 
 mod confirm;
+mod connect;
 mod llm;
 mod mcp;
 mod scripts;
@@ -139,6 +140,62 @@ async fn open_url(url: String) -> Result<(), String> {
     tauri_plugin_opener::open_url(url, None::<&str>).map_err(|e| e.to_string())
 }
 
+/// 用 OpenRouter 登入：開瀏覽器 → 使用者登入並同意 → 本機接收授權碼 → 換成 API key 存進認證管理員，並切換到 OpenRouter
+#[tauri::command]
+async fn openrouter_login(state: St<'_>) -> Result<(), String> {
+    let zh = state.lang() != "en";
+    let _guard = connect::LoginGuard::acquire(zh)?;
+    let pending = connect::start_login()?;
+    tauri_plugin_opener::open_url(pending.auth_url.clone(), None::<&str>).map_err(|e| e.to_string())?;
+    let (pending, code) = tauri::async_runtime::spawn_blocking(move || {
+        let c = connect::wait_for_code(&pending, zh);
+        (pending, c)
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+    let key = connect::exchange_code(&pending, &code?, zh).await?;
+    settings::set_key("openrouter", &key)?;
+    let mut s = state.settings.lock().map_err(|e| e.to_string())?.clone();
+    if s.provider != "openrouter" {
+        s.provider = "openrouter".into();
+        s.model = String::new();
+        s.base_url = String::new();
+    }
+    if s.model.is_empty() {
+        s.model = llm::presets().into_iter().find(|p| p.id == "openrouter").map(|p| p.default_model.to_string()).unwrap_or_default();
+    }
+    s.sanitize();
+    settings::save(&s)?;
+    *state.settings.lock().map_err(|e| e.to_string())? = s;
+    Ok(())
+}
+
+#[tauri::command]
+async fn openrouter_cancel() -> Result<(), String> {
+    connect::cancel_login();
+    Ok(())
+}
+
+#[tauri::command]
+async fn claude_desktop_status() -> Result<connect::ClaudeDesktopStatus, String> {
+    Ok(connect::claude_status())
+}
+
+/// 加入或移除 Claude Desktop 的 MCP 設定（會跳原生確認視窗）。回傳 false 代表使用者取消。
+#[tauri::command]
+async fn claude_desktop_connect(window: tauri::WebviewWindow, state: St<'_>, add: bool) -> Result<bool, String> {
+    let hwnd = window.hwnd().map(|h| h.0 as isize).unwrap_or(0);
+    let zh = state.lang() != "en";
+    tauri::async_runtime::spawn_blocking(move || connect::claude_set(&confirm::Origin::Gui(hwnd), zh, add))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn detect_local_models() -> Result<Vec<connect::LocalServer>, String> {
+    Ok(connect::detect_local().await)
+}
+
 #[tauri::command]
 async fn mcp_config() -> Result<String, String> {
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
@@ -167,7 +224,12 @@ pub fn run() {
             chat,
             open_session_path,
             open_url,
-            mcp_config
+            mcp_config,
+            openrouter_login,
+            openrouter_cancel,
+            claude_desktop_status,
+            claude_desktop_connect,
+            detect_local_models
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

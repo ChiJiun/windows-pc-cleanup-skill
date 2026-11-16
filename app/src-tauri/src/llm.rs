@@ -1,5 +1,6 @@
 //! AI 模型轉接：Anthropic 走原生 Messages API；OpenAI、Gemini、Grok、Ollama、LM Studio 與自訂端點走 OpenAI 相容的 Chat Completions。
-//! 送到雲端前（redact 開啟時）會把使用者資料夾路徑與電腦名稱遮蔽掉；工具執行時再把 %USERPROFILE% 展開回來。
+//! 送到雲端前（redact 開啟時）會把使用者資料夾路徑、使用者名稱、電腦名稱與電子郵件地址遮蔽掉；
+//! 工具執行時再把參數中的 %USERPROFILE%、<user>、<computer> 換回真實值（見 tools::expand）。
 
 use crate::settings::Settings;
 use crate::tools;
@@ -93,24 +94,57 @@ fn client() -> Result<reqwest::Client, String> {
 
 // ---- 遮蔽 ----
 
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Kind {
+    User,
+    /// 常見的通用帳號名稱（見 GENERIC_USER_NAMES）
+    GenericUser,
+    Computer,
+}
+
+struct Name {
+    /// (?i)^名稱，對「從候選位置開始的剩餘文字」比對
+    head: Regex,
+    kind: Kind,
+    /// 名稱的第一個／最後一個字元是不是「字」的一部分：是的話，那一側緊鄰的字元不能也是字（避免 malice 裡的 alice 被遮）
+    first_word: bool,
+    last_word: bool,
+    chars: usize,
+}
+
 pub struct Redactor {
     profile: Regex,
-    users: Vec<Regex>,
-    computer: Option<Regex>,
+    /// 所有名稱合成一個 alternation，只用來快速找到候選位置；真正的判斷在 match_at
+    any: Option<Regex>,
+    /// 由長到短：電腦名稱常包含使用者名稱（例如 ALICE-PC7X 與 alice），要先試長的
+    names: Vec<Name>,
+    email_tail: Regex,
+    /// 還原用：使用者名稱（依登入名稱、使用者資料夾名稱的順序）與電腦名稱
+    users: Vec<String>,
+    computer: Option<String>,
 }
 
 /// 常見的通用帳號名稱：直接整字遮蔽會把一般文字（例如 "User Temp folder"）一起換掉，
 /// 所以這些名稱只遮蔽出現在 \ 或 / 之後的情況（例如排程工作建立者 PC\USER）
 const GENERIC_USER_NAMES: [&str; 10] = ["user", "users", "admin", "administrator", "owner", "guest", "default", "public", "test", "home"];
 
-fn user_regex(name: &str) -> Option<Regex> {
-    let n = regex::escape(name);
-    if GENERIC_USER_NAMES.iter().any(|g| g.eq_ignore_ascii_case(name)) {
-        // ${1} 保留前面的分隔符號（含 JSON 跳脫的 \\）
-        Regex::new(&format!(r"(?i)(\\\\|\\|/){n}\b")).ok()
-    } else {
-        Regex::new(&format!(r"(?i)()\b{n}\b")).ok()
-    }
+/// 中日韓文字之間不會有空白，名稱前後緊接這些字（例如「擁有者王小明的檔案」）也要遮蔽，
+/// 所以判斷字的邊界時，這些字元不算「字」的一部分
+fn is_cjk(c: char) -> bool {
+    matches!(c as u32,
+        0x1100..=0x11FF | 0x2E80..=0x2FDF | 0x3040..=0x30FF | 0x3100..=0x318F | 0x31A0..=0x31FF
+        | 0x3400..=0x4DBF | 0x4E00..=0x9FFF | 0xA960..=0xA97F | 0xAC00..=0xD7FF | 0xF900..=0xFAFF
+        | 0xFF66..=0xFFDC | 0x20000..=0x3FFFF)
+}
+
+fn is_word(c: char) -> bool {
+    (c.is_alphanumeric() || c == '_') && !is_cjk(c)
+}
+
+/// 太短的名稱會誤遮一般文字：拉丁字母等至少 3 個字；含中日韓文字的名稱 2 個字就遮（例如「小明」）
+fn long_enough(n: &str) -> bool {
+    let k = n.chars().count();
+    k >= 3 || (k == 2 && n.chars().any(is_cjk))
 }
 
 impl Redactor {
@@ -119,32 +153,108 @@ impl Redactor {
         Self::with(std::env::var("USERNAME").ok().into_iter().chain(home).collect(), std::env::var("COMPUTERNAME").ok())
     }
 
-    /// users：登入名稱與使用者資料夾名稱（兩者可能不同）；長度少於 3 的不處理，避免誤遮一般文字
+    /// users：登入名稱與使用者資料夾名稱（兩者可能不同）；太短的不處理（見 long_enough）
     fn with(users: Vec<String>, computer: Option<String>) -> Self {
         // 任何磁碟上的 X:\Users\<名稱>（含 JSON 跳脫的 \\ 與 /）
         let profile = Regex::new(r#"(?i)\b[A-Z]:(\\\\|\\|/)Users(\\\\|\\|/)[^\\/"\r\n\t<>|]+"#).expect("valid regex");
-        let mut names: Vec<String> = Vec::new();
-        for u in users.into_iter().map(|u| u.trim().to_string()).filter(|u| u.chars().count() >= 3) {
-            if !names.iter().any(|x| x.eq_ignore_ascii_case(&u)) {
-                names.push(u);
+        // 名稱後面接著的電子郵件其餘部分（Microsoft 帳號的 USERNAME 只是電子郵件的前 5 個字）
+        let email_tail = Regex::new(r"(?i)^[a-z0-9._%+-]*@[a-z0-9-]+(?:\.[a-z0-9-]+)*\.[a-z]{2,}").expect("valid regex");
+        let mut texts: Vec<(String, Kind)> = Vec::new();
+        let candidates = users.into_iter().map(|u| (u, Kind::User)).chain(computer.map(|c| (c, Kind::Computer)));
+        for (n, kind) in candidates {
+            let n = n.trim().to_string();
+            // 電腦名稱與使用者名稱相同時當成使用者名稱
+            if !long_enough(&n) || texts.iter().any(|(x, _)| x.eq_ignore_ascii_case(&n)) {
+                continue;
             }
+            let kind = if kind == Kind::User && GENERIC_USER_NAMES.iter().any(|g| g.eq_ignore_ascii_case(&n)) { Kind::GenericUser } else { kind };
+            texts.push((n, kind));
         }
-        let users = names.iter().filter_map(|u| user_regex(u)).collect();
-        let computer = computer
-            .filter(|c| c.chars().count() >= 3)
-            .and_then(|c| Regex::new(&format!(r"(?i)\b{}\b", regex::escape(&c))).ok());
-        Redactor { profile, users, computer }
+        let users = texts.iter().filter(|(_, k)| *k != Kind::Computer).map(|(n, _)| n.clone()).collect();
+        let computer = texts.iter().find(|(_, k)| *k == Kind::Computer).map(|(n, _)| n.clone());
+        let mut names: Vec<Name> = texts
+            .iter()
+            .filter_map(|(n, kind)| {
+                Some(Name {
+                    head: Regex::new(&format!("(?i)^{}", regex::escape(n))).ok()?,
+                    kind: *kind,
+                    first_word: n.chars().next().is_some_and(is_word),
+                    last_word: n.chars().next_back().is_some_and(is_word),
+                    chars: n.chars().count(),
+                })
+            })
+            .collect();
+        names.sort_by_key(|n| std::cmp::Reverse(n.chars));
+        let any = if texts.is_empty() {
+            None
+        } else {
+            Regex::new(&format!("(?i){}", texts.iter().map(|(n, _)| regex::escape(n)).collect::<Vec<_>>().join("|"))).ok()
+        };
+        Redactor { profile, any, names, email_tail, users, computer }
     }
 
     pub fn apply(&self, s: &str) -> String {
-        let mut out = self.profile.replace_all(s, "%USERPROFILE%").into_owned();
-        for u in &self.users {
-            out = u.replace_all(&out, "${1}<user>").into_owned();
+        let replaced = self.profile.replace_all(s, "%USERPROFILE%");
+        let s: &str = &replaced;
+        let Some(any) = &self.any else { return s.to_string() };
+        // 只掃一次：已換上的 <user>／<computer> 不會再被其他名稱比對到
+        let mut out = String::with_capacity(s.len());
+        let (mut last, mut pos) = (0, 0);
+        while let Some(m) = any.find_at(s, pos) {
+            let start = m.start();
+            match self.match_at(s, start) {
+                Some((end, mark)) => {
+                    out.push_str(&s[last..start]);
+                    out.push_str(mark);
+                    (last, pos) = (end, end);
+                }
+                None => pos = start + s[start..].chars().next().map_or(1, char::len_utf8),
+            }
         }
-        if let Some(c) = &self.computer {
-            out = c.replace_all(&out, "<computer>").into_owned();
-        }
+        out.push_str(&s[last..]);
         out
+    }
+
+    /// start 位置是否是某個名稱的完整出現；是的話回傳結束位置與要換上的代稱
+    fn match_at(&self, s: &str, start: usize) -> Option<(usize, &'static str)> {
+        let prev = s[..start].chars().next_back();
+        let rest = &s[start..];
+        self.names.iter().find_map(|n| {
+            let end = start + n.head.find(rest)?.end();
+            let prev_ok = match n.kind {
+                Kind::GenericUser => matches!(prev, Some('\\' | '/')),
+                _ => !(n.first_word && prev.is_some_and(is_word)),
+            };
+            if !prev_ok {
+                return None;
+            }
+            if n.kind == Kind::User
+                && let Some(t) = self.email_tail.find(&s[end..])
+            {
+                return Some((end + t.end(), "<email>"));
+            }
+            if n.last_word && s[end..].chars().next().is_some_and(is_word) {
+                return None;
+            }
+            Some((end, if n.kind == Kind::Computer { "<computer>" } else { "<user>" }))
+        })
+    }
+
+    /// 把工具參數中的 <user>／<computer>（不分大小寫）換回真實名稱。
+    /// Windows 檔名不能含 < 與 >，所以真實路徑裡不會出現這兩個代稱，沒開遮蔽時換也不會誤傷。
+    /// 使用者名稱可能有兩個（登入名稱與使用者資料夾名稱不同），依序試，優先回傳實際存在的路徑。
+    pub fn restore(&self, s: &str) -> String {
+        let user_mark = Regex::new("(?i)<user>").expect("valid regex");
+        let computer_mark = Regex::new("(?i)<computer>").expect("valid regex");
+        let base = match &self.computer {
+            Some(c) => computer_mark.replace_all(s, regex::NoExpand(c)).into_owned(),
+            None => s.to_string(),
+        };
+        if !user_mark.is_match(&base) {
+            return base;
+        }
+        let candidates: Vec<String> = self.users.iter().map(|u| user_mark.replace_all(&base, regex::NoExpand(u)).into_owned()).collect();
+        candidates.iter().find(|c| std::path::Path::new(c.as_str()).exists()).or(candidates.first()).cloned().unwrap_or(base)
     }
 }
 
@@ -168,7 +278,7 @@ fn system_prompt(lang: &str) -> String {
 4. 不要打開、讀取或要求查看個人敏感檔案（證件、密碼、金融、復原碼等）；看到這類檔名只提醒使用者自行處理。
 5. 不要建議結束使用者正在使用的程式；若有異常程序，說明原因並讓使用者決定。
 6. 使用者決定略過或待決定的項目，用 log_action 記下來；最後用 build_report 產生報告。
-7. 用繁體中文（台灣用語）回答，簡潔、條列，數字要附單位。路徑中的 %USERPROFILE% 是使用者資料夾的代稱，可以直接用在工具參數裡。"#;
+7. 用繁體中文（台灣用語）回答，簡潔、條列，數字要附單位。路徑中的 %USERPROFILE% 是使用者資料夾的代稱，<user>、<computer> 是遮蔽後的使用者名稱與電腦名稱，都可以直接用在工具參數裡；<email> 是遮蔽後的電子郵件地址，無法還原，不要用在工具參數中。"#;
     let en = r#"You are the assistant inside the Windows PC Cleanup desktop app. You help the user scan the PC, clean up unnecessary files, organize folders, and check hardware/software health.
 Rules:
 1. Look, then ask, then act. Scan with read-only tools first, explain findings and recommendations (size, risk, whether it can be undone), and act only after the user agrees.
@@ -177,7 +287,7 @@ Rules:
 4. Do not open, read, or ask to see personal sensitive files (IDs, passwords, financial documents, recovery codes). If you see such file names, only remind the user to handle them.
 5. Do not suggest ending programs the user is using. If a process looks abnormal, explain why and let the user decide.
 6. Record items the user skips or leaves pending with log_action; finish with build_report.
-7. Reply in English, concise, with bullet points and units on numbers. %USERPROFILE% in paths stands for the user's folder and can be used directly in tool arguments."#;
+7. Reply in English, concise, with bullet points and units on numbers. %USERPROFILE% in paths stands for the user's folder, and <user> and <computer> stand for the redacted user name and computer name; all of them can be used directly in tool arguments. <email> is a redacted email address that cannot be restored; do not use it in tool arguments."#;
     if lang == "en" { en.into() } else { zh.into() }
 }
 
@@ -374,9 +484,59 @@ mod tests {
         // 排程工作建立者 <電腦>\<使用者>
         assert_eq!(r.apply(r"Author: DESKTOP-AB12\alice"), r"Author: <computer>\<user>");
         assert_eq!(r.apply(r#"{"Author":"DESKTOP-AB12\\ALICE"}"#), r#"{"Author":"<computer>\\<user>"}"#);
-        assert_eq!(r.apply("owner alice@example.com"), "owner <user>@example.com");
+        assert_eq!(r.apply("owner alice@example.com"), "owner <email>");
         // 只遮整個字，不動包含它的其他字；長度少於 3 的名稱不處理
         assert_eq!(r.apply("malice palace al"), "malice palace al");
+    }
+
+    #[test]
+    fn computer_name_containing_user_name() {
+        let r = Redactor::with(vec!["alice".into()], Some("ALICE-PC7X".into()));
+        assert_eq!(r.apply(r"Author: ALICE-PC7X\alice"), r"Author: <computer>\<user>");
+        assert_eq!(r.apply("alice-pc7xyz"), "<user>-pc7xyz");
+        // 使用者名稱剛好是 computer 時，不會把已換上的 <computer> 再改掉
+        let r = Redactor::with(vec!["computer".into()], Some("DESKTOP-AB12".into()));
+        assert_eq!(r.apply(r"DESKTOP-AB12\computer"), r"<computer>\<user>");
+    }
+
+    #[test]
+    fn cjk_and_edge_cases() {
+        let r = Redactor::with(vec!["王小明".into()], None);
+        assert_eq!(r.apply("擁有者王小明的檔案"), "擁有者<user>的檔案");
+        let r = Redactor::with(vec!["小明".into(), "ab".into()], None);
+        assert_eq!(r.apply("小明的報告 ab"), "<user>的報告 ab");
+        let r = Redactor::with(vec!["alice".into()], None);
+        assert_eq!(r.apply("使用者alice的檔案"), "使用者<user>的檔案");
+        // 名稱開頭或結尾不是字（例如 -）時，那一側不要求邊界
+        let r = Redactor::with(vec!["bob-".into()], None);
+        assert_eq!(r.apply("owner bob-x"), "owner <user>x");
+        assert_eq!(r.apply("kbob-"), "kbob-");
+    }
+
+    #[test]
+    fn microsoft_account_email_is_redacted() {
+        // Microsoft 帳號的 USERNAME 只有電子郵件前 5 個字
+        let r = Redactor::with(vec!["alice".into()], None);
+        assert_eq!(r.apply("Author: MicrosoftAccount\\alicewang@example.com.tw"), "Author: MicrosoftAccount\\<email>");
+        assert_eq!(r.apply("alicewang 的資料"), "alicewang 的資料");
+        assert_eq!(r.apply("icon@2x.png"), "icon@2x.png");
+    }
+
+    #[test]
+    fn restore_placeholders_for_tool_arguments() {
+        let r = Redactor::with(vec!["alice".into()], Some("ALICE-PC7X".into()));
+        assert_eq!(r.restore(r"D:\<user>\Downloads"), r"D:\alice\Downloads");
+        assert_eq!(r.restore(r"\\<Computer>\share\<USER>"), r"\\ALICE-PC7X\share\alice");
+        assert_eq!(r.restore(r"C:\x\$1"), r"C:\x\$1");
+        // 兩個名稱時優先選實際存在的路徑
+        let tmp = std::env::temp_dir().join(format!("pcc-restore-{}", std::process::id()));
+        std::fs::create_dir_all(tmp.join("bob")).unwrap();
+        let r = Redactor::with(vec!["alice".into(), "bob".into()], None);
+        let got = r.restore(&format!(r"{}\<user>", tmp.display()));
+        std::fs::remove_dir(tmp.join("bob")).unwrap();
+        std::fs::remove_dir(&tmp).unwrap();
+        assert_eq!(got, format!(r"{}\bob", tmp.display()));
+        assert_eq!(r.restore(r"Z:\nope\<user>"), r"Z:\nope\alice");
     }
 
     #[test]

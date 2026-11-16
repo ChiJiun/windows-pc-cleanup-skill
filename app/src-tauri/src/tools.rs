@@ -6,6 +6,7 @@
 //! - organize_apply 只接受目前工作階段內的計畫檔；organize_plan 不開放 -AllowUnsafeRoot。
 //! - organize_undo 只接受工作階段資料夾內的紀錄檔。計畫與紀錄的來源都必須在同一個資料夾，搬移目的地必須在那個資料夾底下，
 //!   確認視窗會顯示這個資料夾；隔離資料夾與紀錄中要搬回的項目只能在整理資料夾或工作階段資料夾底下。
+//!   這些範圍檢查除了比對字串，也會解析 junction／符號連結，確認實際位置仍在範圍內。
 
 use crate::confirm::{self, Origin};
 use crate::scripts::{self, PsArg, RunOutput};
@@ -13,7 +14,7 @@ use crate::settings::Settings;
 use regex::Regex;
 use serde::Serialize;
 use serde_json::{Map, Value, json};
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::SystemTime;
 
@@ -79,7 +80,7 @@ pub fn specs() -> Vec<ToolSpec> {
         ToolSpec { name: "clear_folder", zh: "清空一個快取資料夾的內容（保留資料夾本身，直接刪除、不進資源回收筒）。path 必須是 scan_cleanup_targets 結果中 Action 為 clear-folder 的 RealPath。相關程式執行中時會中止。", en: "Empty a cache folder (keeps the folder; deletes directly, not to the Recycle Bin). path must be the RealPath of a scan_cleanup_targets item whose Action is clear-folder. Aborts if related apps are running.", schema: obj(json!({ "path": { "type": "string" }, "processNames": { "type": "array", "items": { "type": "string" } }, "apply": apply }), &["path"]) },
         ToolSpec { name: "clean_old_files", zh: "刪除資料夾中超過 N 天的舊檔（預設直接刪除；recycle=true 改送資源回收筒）。path 必須是 scan_cleanup_targets 結果中 Action 為 clean-old-files 的 RealPath。", en: "Delete files older than N days in a folder (deleted directly by default; recycle=true sends them to the Recycle Bin). path must be the RealPath of a scan_cleanup_targets item whose Action is clean-old-files.", schema: obj(json!({ "path": { "type": "string" }, "olderThanDays": { "type": "integer" }, "excludeTopLevel": { "type": "array", "items": { "type": "string" } }, "recycle": { "type": "boolean" }, "apply": apply }), &["path"]) },
         ToolSpec { name: "organize_plan", zh: "為一個資料夾（預設是下載資料夾）產生整理計畫：依類型與主題分類、找出重複檔與已解壓縮的壓縮檔。只產生計畫，不搬動任何檔案。系統與使用者根資料夾會被拒絕。", en: "Create an organization plan for a folder (Downloads by default): sort by type and topic, find duplicates and extracted archives. Only creates a plan; moves nothing. System and user root folders are refused.", schema: obj(json!({ "root": { "type": "string" } }), &[]) },
-        ToolSpec { name: "organize_apply", zh: "依整理計畫搬移檔案（plan 是 organize_plan 回傳的 planFile；省略時用目前工作階段最新的計畫）。要移除的項目送資源回收筒，或指定 quarantineDir 隔離（必須在整理資料夾底下，例如 <root>\\_quarantine）。會留下還原腳本與紀錄。", en: "Move files according to an organization plan (plan = the planFile returned by organize_plan; defaults to the latest plan in this session). Items to remove go to the Recycle Bin, or to quarantineDir (must be inside the organized folder, e.g. <root>\\_quarantine). Leaves an undo script and a log.", schema: obj(json!({ "plan": { "type": "string" }, "quarantineDir": { "type": "string" }, "apply": apply }), &[]) },
+        ToolSpec { name: "organize_apply", zh: "依整理計畫搬移檔案（plan 是 organize_plan 回傳的 planFile；省略時用目前工作階段最新的計畫）。要移除的項目送資源回收筒，或指定 quarantineDir 隔離（必須在整理資料夾或工作階段資料夾底下，例如 <root>\\_quarantine）。會留下還原腳本與紀錄。", en: "Move files according to an organization plan (plan = the planFile returned by organize_plan; defaults to the latest plan in this session). Items to remove go to the Recycle Bin, or to quarantineDir (must be inside the organized folder or the sessions folder, e.g. <root>\\_quarantine). Leaves an undo script and a log.", schema: obj(json!({ "plan": { "type": "string" }, "quarantineDir": { "type": "string" }, "apply": apply }), &[]) },
         ToolSpec { name: "organize_undo", zh: "依整理紀錄把搬過的檔案搬回原位。log 必須是工作階段資料夾內的 organize-log-*.csv（organize_apply 回傳的 logFile）。", en: "Move files back according to an organize log. log must be an organize-log-*.csv inside the sessions folder (the logFile returned by organize_apply).", schema: obj(json!({ "log": { "type": "string" }, "apply": apply }), &["log"]) },
         ToolSpec { name: "build_report", zh: "產生這個工作階段的 HTML 總整報告（清理成果、健檢、整理、待決定事項、溯源與還原方式）。", en: "Build the HTML report for this session (results, health, organization, pending items, traceability and undo).", schema: obj(json!({}), &[]) },
         ToolSpec { name: "log_action", zh: "記錄一筆動作到工作階段（例如使用者決定略過或待決定的項目），會出現在報告中。", en: "Record an action in the session (e.g. items the user skipped or left pending); it appears in the report.", schema: obj(json!({ "category": { "type": "string" }, "action": { "type": "string" }, "target": { "type": "string" }, "result": { "type": "string", "enum": ["done", "partial", "skipped", "failed", "pending"] }, "reversible": { "type": "string", "enum": ["yes", "recycle-bin", "undo-script", "reinstall", "no"] }, "note": { "type": "string" }, "bytesFreed": { "type": "integer" } }), &["category", "action"]) },
@@ -101,7 +102,8 @@ fn expand(s: &str) -> String {
             out = re.replace_all(&out, regex::NoExpand(&v)).into_owned();
         }
     }
-    out
+    // 遮蔽後的 <user>／<computer>（AI 看到的路徑是 D:\<user>\Downloads 這種形式）換回真實名稱
+    crate::llm::Redactor::new().restore(&out)
 }
 
 fn arg_s(a: &Value, k: &str) -> Option<String> {
@@ -149,9 +151,45 @@ fn is_inside(child: &Path, parent: &Path) -> bool {
 /// 必須是完整路徑，而且不能含 . 或 .. 這類相對路徑片段（避免字串比對被 ..\ 繞過）
 /// 也不能含控制字元（Windows 檔名本來就不允許，出現代表是想在確認視窗插入假說明）
 fn plain_abs(p: &Path) -> bool {
-    p.is_absolute()
-        && !p.components().any(|c| matches!(c, Component::ParentDir | Component::CurDir))
-        && !p.to_string_lossy().chars().any(char::is_control)
+    p.is_absolute() && !has_dot_segment(&p.to_string_lossy()) && !p.to_string_lossy().chars().any(char::is_control)
+}
+
+/// 用原始字串檢查每一段：components() 會把中間的 . 正規化掉（<root>\. 看起來就像 <root> 底下的項目），
+/// Windows 又會去掉每一段結尾的 . 與空白（"..."、" " 都等於上一層本身），連續的 \\ 也會被合併。
+/// 所以去掉結尾的 . 與空白後變成空字串的段落一律拒絕；只允許 UNC 開頭的 \\ 與最後一個分隔符號。
+fn has_dot_segment(s: &str) -> bool {
+    let body = s.strip_prefix(r"\\").unwrap_or(s);
+    let body = body.strip_suffix(['\\', '/']).unwrap_or(body);
+    body.split(['\\', '/']).any(|seg| seg.trim_end_matches(['.', ' ']).is_empty())
+}
+
+/// 解析路徑中已經存在的部分：從目標往上找到第一個存在的上層，解析其中的 junction、符號連結與 8.3 短檔名後，
+/// 再接回還不存在的部分（不存在的部分不可能是連結）。存在但無法解析（例如指向不存在位置的 junction）回傳 None。
+fn resolve_existing(p: &Path) -> Option<PathBuf> {
+    let mut base = p;
+    let mut tail = Vec::new();
+    loop {
+        if let Some(c) = canonical(base) {
+            return Some(tail.iter().rev().fold(c, |acc, t| acc.join(t)));
+        }
+        if std::fs::symlink_metadata(base).is_ok() {
+            return None;
+        }
+        tail.push(base.file_name()?);
+        base = base.parent()?;
+    }
+}
+
+/// p 是否在 root 或 sessions 底下：原始字串與解析 junction 後的實際位置都要符合
+/// （避免範圍內已有指向外部的 junction 時，字串比對通過、實際卻寫到外面）。sessions 必須是已解析的路徑。
+fn inside_scope(p: &Path, root: &Path, sessions: Option<&Path>) -> bool {
+    let within = |x: &Path, r: &Path| is_inside(x, r) || sessions.is_some_and(|s| is_inside(x, s));
+    plain_abs(p)
+        && within(p, root)
+        && match (resolve_existing(p), resolve_existing(root)) {
+            (Some(rp), Some(rr)) => within(&rp, &rr),
+            _ => false,
+        }
 }
 
 fn row_str<'a>(r: &'a Value, k: &str) -> &'a str {
@@ -211,7 +249,8 @@ pub(crate) fn summarize_plan(rows: &[Value], zh: bool) -> Result<PlanSummary, St
             "Move" => {
                 let dest = Path::new(row_str(r, "Dest"));
                 let dir = dest.parent().unwrap_or(dest);
-                if !plain_abs(dest) || (!is_inside(dir, &root) && !same_path(dir, &root)) {
+                // 目的地本身就在 root 底下（不是 root 本身），所以也用 inside_scope 確認沒有經過指向外部的 junction
+                if !plain_abs(dest) || (!is_inside(dir, &root) && !same_path(dir, &root)) || !inside_scope(dest, &root, None) {
                     return Err(msg(zh, &format!("搬移目的地不在整理資料夾內：{}", dest.display()), &format!("A move destination is outside the organized folder: {}", dest.display())));
                 }
                 // 上面已確認 dir 在 root 底下（不分大小寫），這裡取出相對部分顯示
@@ -241,7 +280,7 @@ const BIN_MARKERS: [&str; 2] = ["(RecycleBin)", "(資源回收筒)"];
 /// 隔離資料夾只能放在整理資料夾底下或工作階段資料夾底下：
 /// 被隔離的多半是安裝檔，放到啟動資料夾、系統資料夾等位置可能在登入時被自動執行
 pub(crate) fn check_quarantine(q: &Path, root: &Path, sessions: Option<&Path>, zh: bool) -> Result<(), String> {
-    if plain_abs(q) && (is_inside(q, root) || sessions.is_some_and(|s| is_inside(q, s))) {
+    if inside_scope(q, root, sessions) {
         return Ok(());
     }
     Err(msg(
@@ -260,7 +299,7 @@ pub(crate) fn summarize_log(rows: &[Value], sessions: Option<&Path>, zh: bool) -
     let mut restorable = 0;
     for r in rows.iter().filter(ok).filter(|r| !row_str(r, "Final").is_empty() && !BIN_MARKERS.contains(&row_str(r, "Final"))) {
         let f = Path::new(row_str(r, "Final"));
-        if !(plain_abs(f) && (is_inside(f, &root) || sessions.is_some_and(|s| is_inside(f, s)))) {
+        if !inside_scope(f, &root, sessions) {
             return Err(msg(
                 zh,
                 &format!("紀錄中要搬回的項目不在整理資料夾或工作階段資料夾內：{}", f.display()),
@@ -737,6 +776,68 @@ mod tests {
         assert!(check_quarantine(Path::new(r"_quarantine"), root, sess, true).is_err());
         assert!(check_quarantine(Path::new("C:\\U\\a\\Downloads\\_q\r\n\u{2714} 安全"), root, sess, true).is_err());
         assert!(check_quarantine(Path::new(r"C:\U\a\PCCleanup\q"), root, None, true).is_err());
+    }
+
+    #[test]
+    fn quarantine_rejects_dot_and_blank_segments() {
+        let (root, sess) = (Path::new(r"C:\U\a\Downloads"), Some(Path::new(r"C:\U\a\PCCleanup")));
+        for q in [r"C:\U\a\Downloads\.", r"C:\U\a\Downloads\.\", r"C:\U\a\Downloads\...", r"C:\U\a\Downloads\ ", r"C:\U\a\Downloads\. .", r"C:\U\a\Downloads\\", r"C:\U\a\Downloads\x\..", r"C:\U\a\PCCleanup\."] {
+            assert!(check_quarantine(Path::new(q), root, sess, true).is_err(), "{q}");
+        }
+        assert!(check_quarantine(Path::new(r"C:\U\a\Downloads\_quarantine\"), root, sess, true).is_ok());
+        assert!(check_quarantine(Path::new(r"C:\U\a\Downloads\.hidden"), root, sess, true).is_ok());
+        assert!(has_dot_segment(r"C:\a\\b"));
+        assert!(!has_dot_segment(r"\\server\share\x"));
+    }
+
+    /// 在暫存資料夾建立 root、外部資料夾與 root\link（junction → 外部），測完移除
+    struct JunctionFixture {
+        base: PathBuf,
+        root: PathBuf,
+        link: PathBuf,
+    }
+    impl JunctionFixture {
+        fn new(tag: &str) -> Self {
+            let base = std::env::temp_dir().join(format!("pcc-junction-{tag}-{}", std::process::id()));
+            let (root, outside) = (base.join("root"), base.join("outside"));
+            std::fs::create_dir_all(&root).unwrap();
+            std::fs::create_dir_all(&outside).unwrap();
+            let link = root.join("link");
+            let st = std::process::Command::new("cmd").args(["/c", "mklink", "/J"]).arg(&link).arg(&outside).output().unwrap();
+            assert!(st.status.success(), "mklink /J failed");
+            JunctionFixture { base, root, link }
+        }
+    }
+    impl Drop for JunctionFixture {
+        fn drop(&mut self) {
+            // 先移除 junction 本身（不會動到目標），再移除測試資料夾
+            let _ = std::fs::remove_dir(&self.link);
+            let _ = std::fs::remove_dir_all(&self.base);
+        }
+    }
+
+    #[test]
+    fn scope_checks_resolve_junctions() {
+        let f = JunctionFixture::new("scope");
+        assert!(check_quarantine(&f.root.join("_quarantine"), &f.root, None, true).is_ok());
+        assert!(check_quarantine(&f.link, &f.root, None, true).is_err());
+        assert!(check_quarantine(&f.link.join("sub"), &f.root, None, true).is_err());
+        let src = f.root.join("x.exe").to_string_lossy().into_owned();
+        let log = |fin: PathBuf| rows(json!([{ "Source": src, "Action": "Recycle", "Final": fin.to_string_lossy(), "Status": "OK" }]));
+        assert!(summarize_log(&log(f.root.join("_q").join("x.exe")), None, true).is_ok());
+        assert!(summarize_log(&log(f.link.join("x.exe")), None, true).is_err());
+        let plan = |dest: PathBuf| rows(json!([{ "Source": src, "Action": "Move", "Dest": dest.to_string_lossy() }]));
+        assert!(summarize_plan(&plan(f.root.join("圖片").join("x.exe")), true).is_ok());
+        assert!(summarize_plan(&plan(f.link.join("x.exe")), true).is_err());
+    }
+
+    #[test]
+    fn expand_restores_redacted_placeholders() {
+        let user = std::env::var("USERNAME").unwrap_or_default();
+        if user.chars().count() >= 3 {
+            assert_eq!(expand(r"D:\<user>\Downloads"), format!(r"D:\{user}\Downloads"));
+        }
+        assert_eq!(expand(r"%NOPE%\<other>"), r"%NOPE%\<other>");
     }
 
     #[test]

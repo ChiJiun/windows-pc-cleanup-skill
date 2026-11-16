@@ -13,7 +13,8 @@ use sha2::{Digest, Sha256};
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 fn msg(zh: bool, z: &str, e: &str) -> String {
@@ -167,10 +168,68 @@ fn respond(mut s: TcpStream, ok: bool, zh: bool) {
     );
 }
 
+/// 一條 callback 連線的判讀結果
+#[derive(Debug, PartialEq)]
+pub(crate) enum CallbackResult {
+    /// state 相符且帶有授權碼
+    Code(String),
+    /// 使用者在 OpenRouter 按了拒絕：state 相符但沒有授權碼，或完全沒有 state 也沒有授權碼（OpenRouter 拒絕時不會帶回 state）
+    Denied,
+    /// 不採用（state 不符等），繼續等
+    Ignore,
+}
+
+/// 依查詢參數判讀 callback。
+/// 注意：「沒有 state 也沒有授權碼」會當成拒絕而結束流程，所以其他網頁可以送這種請求中止登入；
+/// 這只會讓使用者需要重新登入，拿不到也塞不進授權碼（授權碼一定要 state 相符才採用）。
+pub(crate) fn classify_callback(params: &[(String, String)], expected_state: &str) -> CallbackResult {
+    let get = |k: &str| params.iter().find(|(x, _)| x == k).map(|(_, v)| v.as_str());
+    let code = get("code").filter(|c| !c.is_empty());
+    match get("state") {
+        Some(s) if s == expected_state => match code {
+            Some(c) => CallbackResult::Code(c.to_string()),
+            None => CallbackResult::Denied,
+        },
+        Some(_) => CallbackResult::Ignore,
+        None if code.is_none() => CallbackResult::Denied,
+        None => CallbackResult::Ignore,
+    }
+}
+
+/// 同時處理中的連線上限；超過時直接關掉新連線，避免被大量閒置連線耗盡資源
+const MAX_ACTIVE_CONNECTIONS: usize = 16;
+
+/// 在獨立執行緒讀一條連線並回應；閒置不送資料的連線只會卡住自己的執行緒，不會擋住真正的 callback
+fn handle_connection(mut s: TcpStream, expected_state: &str, zh: bool) -> CallbackResult {
+    let _ = s.set_nonblocking(false);
+    let _ = s.set_read_timeout(Some(Duration::from_secs(5)));
+    let mut buf = [0u8; 8192];
+    let n = s.read(&mut buf).unwrap_or(0);
+    let req = String::from_utf8_lossy(&buf[..n]);
+    let Some(params) = req.lines().next().and_then(parse_callback) else {
+        let _ = write!(s, "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+        return CallbackResult::Ignore;
+    };
+    let r = classify_callback(&params, expected_state);
+    respond(s, matches!(r, CallbackResult::Code(_)), zh);
+    r
+}
+
 /// 等瀏覽器帶授權碼回來（最多 5 分鐘，可取消）。state 不符的請求一律忽略，避免其他網頁送假的授權碼。
 pub fn wait_for_code(p: &PendingLogin, zh: bool) -> Result<String, String> {
     let deadline = Instant::now() + LOGIN_TIMEOUT;
+    let (tx, rx) = mpsc::channel::<CallbackResult>();
+    let active = Arc::new(AtomicUsize::new(0));
     loop {
+        while let Ok(r) = rx.try_recv() {
+            match r {
+                CallbackResult::Code(code) => return Ok(code),
+                CallbackResult::Denied => {
+                    return Err(msg(zh, "OpenRouter 沒有回傳授權碼（可能按了拒絕），請重新嘗試。", "OpenRouter returned no authorization code (access may have been denied). Please try again."));
+                }
+                CallbackResult::Ignore => {}
+            }
+        }
         if CANCEL.load(Ordering::SeqCst) {
             return Err(msg(zh, "已取消登入。", "Sign-in cancelled."));
         }
@@ -178,33 +237,21 @@ pub fn wait_for_code(p: &PendingLogin, zh: bool) -> Result<String, String> {
             return Err(msg(zh, "等候登入逾時（5 分鐘），請重新嘗試。", "Timed out waiting for sign-in (5 minutes). Please try again."));
         }
         for l in &p.listeners {
-            let Ok((mut s, _)) = l.accept() else { continue };
-            let _ = s.set_nonblocking(false);
-            let _ = s.set_read_timeout(Some(Duration::from_secs(5)));
-            let mut buf = [0u8; 8192];
-            let n = s.read(&mut buf).unwrap_or(0);
-            let req = String::from_utf8_lossy(&buf[..n]);
-            let Some(params) = req.lines().next().and_then(parse_callback) else {
-                let _ = write!(s, "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
-                continue;
-            };
-            let get = |k: &str| params.iter().find(|(x, _)| x == k).map(|(_, v)| v.clone());
-            if get("state").as_deref() != Some(p.state.as_str()) {
-                respond(s, false, zh);
-                continue;
-            }
-            match get("code").filter(|c| !c.is_empty()) {
-                Some(code) => {
-                    respond(s, true, zh);
-                    return Ok(code);
+            while let Ok((s, _)) = l.accept() {
+                if active.load(Ordering::SeqCst) >= MAX_ACTIVE_CONNECTIONS {
+                    drop(s);
+                    continue;
                 }
-                None => {
-                    respond(s, false, zh);
-                    return Err(msg(zh, "OpenRouter 沒有回傳授權碼（可能按了拒絕）。", "OpenRouter returned no authorization code (access may have been denied)."));
-                }
+                active.fetch_add(1, Ordering::SeqCst);
+                let (tx, active, state) = (tx.clone(), active.clone(), p.state.clone());
+                std::thread::spawn(move || {
+                    let r = handle_connection(s, &state, zh);
+                    active.fetch_sub(1, Ordering::SeqCst);
+                    let _ = tx.send(r);
+                });
             }
         }
-        std::thread::sleep(Duration::from_millis(150));
+        std::thread::sleep(Duration::from_millis(50));
     }
 }
 
@@ -217,11 +264,16 @@ pub async fn exchange_code(p: &PendingLogin, code: &str, zh: bool) -> Result<Str
         .await
         .map_err(|e| e.to_string())?;
     let status = resp.status();
-    let text = resp.text().await.map_err(|e| e.to_string())?;
     if !status.is_success() {
-        let detail: String = text.chars().take(300).collect();
-        return Err(msg(zh, &format!("換取 API key 失敗（HTTP {status}）：{detail}"), &format!("Failed to get the API key (HTTP {status}): {detail}")));
+        // 只顯示狀態碼，不帶回伺服器的回應內容（內容不受本程式控制）
+        let code = status.as_u16();
+        return Err(msg(
+            zh,
+            &format!("換取 API key 失敗（HTTP {code}）。授權碼可能已過期（10 分鐘）或已使用過，請重新登入。"),
+            &format!("Failed to get the API key (HTTP {code}). The authorization code may have expired (10 minutes) or already been used. Please sign in again."),
+        ));
     }
+    let text = resp.text().await.map_err(|e| e.to_string())?;
     serde_json::from_str::<Value>(&text)
         .ok()
         .and_then(|v| v.get("key").and_then(|k| k.as_str()).map(String::from))
@@ -233,6 +285,8 @@ pub async fn exchange_code(p: &PendingLogin, code: &str, zh: bool) -> Result<Str
 
 pub const SERVER_NAME: &str = "windows-pc-cleanup";
 const CONFIG_FILE: &str = "claude_desktop_config.json";
+/// Microsoft Store（MSIX）版 Claude Desktop 的套件資料夾名稱
+const MSIX_PACKAGE: &str = "Claude_pzs8sxrjxfjjc";
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -260,8 +314,8 @@ pub fn claude_config_path() -> Option<PathBuf> {
     if let Some(local) = dirs::data_local_dir() {
         if let Ok(rd) = std::fs::read_dir(local.join("Packages")) {
             for e in rd.flatten() {
-                let n = e.file_name().to_string_lossy().to_string();
-                if n.starts_with("Claude_") && e.path().is_dir() {
+                // 只比對 Claude Desktop 的完整套件名稱（名稱後半是發行者雜湊），不會誤選其他以 Claude_ 開頭的套件
+                if e.file_name().to_string_lossy().eq_ignore_ascii_case(MSIX_PACKAGE) && e.path().is_dir() {
                     candidates.push(e.path().join(r"LocalCache\Roaming\Claude"));
                 }
             }
@@ -280,15 +334,32 @@ pub fn claude_config_path() -> Option<PathBuf> {
     candidates.into_iter().find(|d| d.is_dir()).map(|d| d.join(CONFIG_FILE))
 }
 
-fn read_config(path: &Path) -> Result<Option<Map<String, Value>>, ()> {
-    let Ok(text) = std::fs::read_to_string(path) else { return Ok(None) };
+/// 讀取設定檔原始內容。檔案不存在 → Ok(None)；其他讀取錯誤（權限、被鎖住等）→ Err，避免把「讀不到」誤當成「沒有檔案」而覆寫掉。
+fn read_raw(path: &Path) -> Result<Option<Vec<u8>>, ()> {
+    match std::fs::read(path) {
+        Ok(b) => Ok(Some(b)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(_) => Err(()),
+    }
+}
+
+/// 解析設定檔內容；不是 UTF-8 或不是 JSON 物件時回傳 Err（這時不會修改它）
+pub(crate) fn parse_config(bytes: &[u8]) -> Result<Map<String, Value>, ()> {
+    let text = std::str::from_utf8(bytes).map_err(|_| ())?;
     let t = text.trim_start_matches('\u{feff}').trim();
     if t.is_empty() {
-        return Ok(Some(Map::new()));
+        return Ok(Map::new());
     }
     match serde_json::from_str::<Value>(t) {
-        Ok(Value::Object(m)) => Ok(Some(m)),
+        Ok(Value::Object(m)) => Ok(m),
         _ => Err(()),
+    }
+}
+
+fn read_config(path: &Path) -> Result<Option<Map<String, Value>>, ()> {
+    match read_raw(path)? {
+        None => Ok(None),
+        Some(b) => parse_config(&b).map(Some),
     }
 }
 
@@ -328,7 +399,8 @@ pub(crate) fn updated_config(mut cfg: Map<String, Value>, entry: Option<Value>) 
             m.insert(SERVER_NAME.into(), e);
         }
         None => {
-            m.remove(SERVER_NAME);
+            // preserve_order 下 remove 等於 swap_remove，會打亂其他項目的順序，所以用 shift_remove
+            m.shift_remove(SERVER_NAME);
         }
     }
     cfg
@@ -346,13 +418,19 @@ fn write_atomic(path: &Path, text: &str) -> Result<(), String> {
 /// 加入（add = true）或移除本程式的 MCP 設定。回傳 Ok(false) 代表使用者在確認視窗按了取消。
 pub fn claude_set(origin: &Origin, zh: bool, add: bool) -> Result<bool, String> {
     let path = claude_config_path().ok_or_else(|| msg(zh, "找不到 Claude Desktop 的設定資料夾，請先安裝並開啟一次 Claude Desktop。", "Claude Desktop's settings folder was not found. Install Claude Desktop and open it once first."))?;
-    let existing = read_config(&path).map_err(|_| {
+    let unreadable = || {
         msg(
             zh,
-            &format!("Claude Desktop 的設定檔不是合法的 JSON，為了避免弄壞它，沒有做任何修改：{}", path.display()),
-            &format!("Claude Desktop's settings file is not valid JSON; it was left untouched to avoid breaking it: {}", path.display()),
+            &format!("Claude Desktop 的設定檔無法讀取或不是合法的 JSON，為了避免弄壞它，沒有做任何修改：{}", path.display()),
+            &format!("Claude Desktop's settings file could not be read or is not valid JSON; it was left untouched to avoid breaking it: {}", path.display()),
         )
-    })?;
+    };
+    // 保留確認前讀到的原始內容，按確定後要比對，避免確認視窗開著時檔案被改、卻用舊內容蓋回去
+    let snapshot = read_raw(&path).map_err(|_| unreadable())?;
+    let existing = match &snapshot {
+        None => None,
+        Some(b) => Some(parse_config(b).map_err(|_| unreadable())?),
+    };
     if !add && existing.as_ref().and_then(|m| m.get("mcpServers")).and_then(|s| s.get(SERVER_NAME)).is_none() {
         return Ok(true);
     }
@@ -381,8 +459,16 @@ pub fn claude_set(origin: &Origin, zh: bool, add: bool) -> Result<bool, String> 
     if !confirm::ask(origin, zh, &action, &details, &warning) {
         return Ok(false);
     }
-    if existing.is_some() {
-        std::fs::copy(&path, &backup).map_err(|e| e.to_string())?;
+    if read_raw(&path).ok() != Some(snapshot.clone()) {
+        return Err(msg(
+            zh,
+            "確認視窗開著的期間，Claude Desktop 的設定檔被修改了。為了不蓋掉新的內容，這次沒有寫入，請再按一次。",
+            "Claude Desktop's settings file changed while the confirmation dialog was open. Nothing was written so the new content is not overwritten; please try again.",
+        ));
+    }
+    if let Some(bytes) = &snapshot {
+        // 備份的內容就是剛剛比對過、要被改寫的那一版
+        std::fs::write(&backup, bytes).map_err(|e| e.to_string())?;
     } else if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     }
@@ -459,22 +545,16 @@ mod tests {
 
     #[test]
     fn callback_requires_matching_state() {
+        let _l = LOGIN_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let _g = LoginGuard::acquire(true).unwrap();
         let p = start_login().unwrap();
         let port = p.listeners[0].local_addr().unwrap().port();
         let state = p.state.clone();
         let sender = std::thread::spawn(move || {
-            let send = |path: String| {
-                let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
-                write!(s, "GET {path} HTTP/1.1\r\nHost: localhost\r\n\r\n").unwrap();
-                let mut resp = String::new();
-                let _ = s.read_to_string(&mut resp);
-                resp
-            };
             // 不相關的路徑 → 404；state 錯誤 → 顯示失敗頁但不採用；最後送正確的
-            assert!(send("/favicon.ico".into()).starts_with("HTTP/1.1 404"));
-            send("/callback?code=evil&state=wrong".into());
-            send(format!("/callback?code=good-code&state={state}"));
+            assert!(send(port, "/favicon.ico").starts_with("HTTP/1.1 404"));
+            assert!(send(port, "/callback?code=evil&state=wrong").contains("連結失敗"));
+            send(port, &format!("/callback?code=good-code&state={state}"));
         });
         assert_eq!(wait_for_code(&p, true).unwrap(), "good-code");
         sender.join().unwrap();
@@ -482,6 +562,82 @@ mod tests {
         assert!(p.auth_url.contains("&code_challenge_method=S256&"));
         // 同時只能有一個登入流程
         assert!(LoginGuard::acquire(true).is_err());
+    }
+
+    #[test]
+    fn remove_keeps_order_of_other_servers() {
+        let cfg: Map<String, Value> =
+            serde_json::from_str(&format!(r#"{{"mcpServers":{{"a":{{}},"{SERVER_NAME}":{{}},"b":{{}},"c":{{}}}},"z":1,"y":2}}"#)).unwrap();
+        let removed = updated_config(cfg, None);
+        let keys: Vec<&String> = removed["mcpServers"].as_object().unwrap().keys().collect();
+        assert_eq!(keys, ["a", "b", "c"]);
+        let top: Vec<&String> = removed.keys().collect();
+        assert_eq!(top, ["mcpServers", "z", "y"]);
+    }
+
+    #[test]
+    fn config_parsing_rejects_non_utf8_and_non_objects() {
+        assert!(parse_config(b"\xff\xfe{\x00}\x00").is_err()); // UTF-16
+        assert!(parse_config(b"[]").is_err());
+        assert!(parse_config(b"{ broken").is_err());
+        assert!(parse_config(b"").unwrap().is_empty());
+        assert_eq!(parse_config("\u{feff}{\"a\":1}".as_bytes()).unwrap()["a"], 1);
+    }
+
+    #[test]
+    fn classify_callback_cases() {
+        let p = |q: &str| parse_callback(&format!("GET /callback{q} HTTP/1.1")).unwrap();
+        assert_eq!(classify_callback(&p("?code=c&state=s"), "s"), CallbackResult::Code("c".into()));
+        assert_eq!(classify_callback(&p("?state=s"), "s"), CallbackResult::Denied);
+        assert_eq!(classify_callback(&p("?error=access_denied"), "s"), CallbackResult::Denied);
+        assert_eq!(classify_callback(&p(""), "s"), CallbackResult::Denied);
+        assert_eq!(classify_callback(&p("?code=evil&state=x"), "s"), CallbackResult::Ignore);
+        assert_eq!(classify_callback(&p("?code=evil"), "s"), CallbackResult::Ignore);
+        assert_eq!(classify_callback(&p("?state=x"), "s"), CallbackResult::Ignore);
+    }
+
+    /// 登入流程用到全域的 RUNNING／CANCEL，相關測試要依序執行
+    static LOGIN_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn send(port: u16, path: &str) -> String {
+        let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        write!(s, "GET {path} HTTP/1.1\r\nHost: localhost\r\n\r\n").unwrap();
+        let mut resp = String::new();
+        let _ = s.read_to_string(&mut resp);
+        resp
+    }
+
+    #[test]
+    fn idle_connection_does_not_block_callback() {
+        let _l = LOGIN_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = LoginGuard::acquire(true).unwrap();
+        let p = start_login().unwrap();
+        let port = p.listeners[0].local_addr().unwrap().port();
+        let state = p.state.clone();
+        let sender = std::thread::spawn(move || {
+            // 先開一條完全不送資料的連線，再送正確的 callback
+            let idle = TcpStream::connect(("127.0.0.1", port)).unwrap();
+            std::thread::sleep(Duration::from_millis(200));
+            send(port, &format!("/callback?code=ok&state={state}"));
+            drop(idle);
+        });
+        let t0 = Instant::now();
+        assert_eq!(wait_for_code(&p, true).unwrap(), "ok");
+        assert!(t0.elapsed() < Duration::from_secs(3), "等了 {:?}", t0.elapsed());
+        sender.join().unwrap();
+    }
+
+    #[test]
+    fn denied_callback_ends_login() {
+        let _l = LOGIN_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = LoginGuard::acquire(true).unwrap();
+        let p = start_login().unwrap();
+        let port = p.listeners[0].local_addr().unwrap().port();
+        let sender = std::thread::spawn(move || send(port, "/callback?error=access_denied"));
+        let t0 = Instant::now();
+        assert!(wait_for_code(&p, true).unwrap_err().contains("拒絕"));
+        assert!(t0.elapsed() < Duration::from_secs(3));
+        assert!(sender.join().unwrap().contains("連結失敗"));
     }
 
     #[test]

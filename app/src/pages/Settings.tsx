@@ -169,11 +169,11 @@ export function Settings({ settings, presets, onSaved, onKeyChanged }: Props) {
     }
   }
 
-  // 一鍵連結改了供應商或模型：已經存好，直接同步草稿與上層
+  // 一鍵連結改了供應商或模型：已經存好，同步上層；草稿只更新供應商、模型、位址，其他尚未儲存的修改（例如遮蔽開關）保留
   function applied(s: SettingsT) {
     setModels(null);
     setKeyInput("");
-    setDraft(s);
+    setDraft((d) => (d ? { ...d, provider: s.provider, model: s.model, baseUrl: s.baseUrl } : s));
     onSaved(s);
   }
 

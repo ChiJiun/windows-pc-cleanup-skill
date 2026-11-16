@@ -190,7 +190,9 @@ export function ConnectCard({ settings, onApplied, onKeyChanged }: Props) {
             {s.custom ? t("connect.local.custom") : ""}
             {s.baseUrl}
           </span>{" "}
-          {!s.running ? (
+          {s.unsupported ? (
+            <span className="muted small">{t("connect.local.unsupported")}</span>
+          ) : !s.running ? (
             <span className="muted small">{t("connect.local.notRunning", { name: s.label })}</span>
           ) : s.models.length === 0 ? (
             <span className="muted small">{t("connect.local.noModels", { name: s.label })}</span>

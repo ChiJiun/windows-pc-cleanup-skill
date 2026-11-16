@@ -120,6 +120,8 @@ export interface LocalServer {
   baseUrl: string;
   /** 這是設定裡填的自訂位址（不是預設的 localhost）；套用這裡的模型時沿用這個位址 */
   custom: boolean;
+  /** AI 助理不能使用這個位址（非本機的 http），所以沒有偵測 */
+  unsupported: boolean;
   running: boolean;
   models: string[];
 }

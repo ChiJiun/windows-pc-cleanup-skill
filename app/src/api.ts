@@ -118,6 +118,8 @@ export interface LocalServer {
   provider: "ollama" | "lmstudio";
   label: string;
   baseUrl: string;
+  /** 這是設定裡填的自訂位址（不是預設的 localhost）；套用這裡的模型時沿用這個位址 */
+  custom: boolean;
   running: boolean;
   models: string[];
 }

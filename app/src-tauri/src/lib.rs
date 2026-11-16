@@ -192,8 +192,13 @@ async fn claude_desktop_connect(window: tauri::WebviewWindow, state: St<'_>, add
 }
 
 #[tauri::command]
-async fn detect_local_models() -> Result<Vec<connect::LocalServer>, String> {
-    Ok(connect::detect_local().await)
+async fn detect_local_models(state: St<'_>) -> Result<Vec<connect::LocalServer>, String> {
+    // 以已儲存的設定為準：目前用的是地端供應商且填了自訂位址時，也偵測那個位址
+    let (provider, base_url) = {
+        let s = state.settings.lock().map_err(|e| e.to_string())?;
+        (s.provider.clone(), s.base_url.clone())
+    };
+    Ok(connect::detect_local(&provider, &base_url).await)
 }
 
 #[tauri::command]

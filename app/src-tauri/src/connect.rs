@@ -10,11 +10,11 @@ use base64::Engine;
 use serde::Serialize;
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
+use std::collections::VecDeque;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, mpsc};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 fn msg(zh: bool, z: &str, e: &str) -> String {
@@ -196,16 +196,57 @@ pub(crate) fn classify_callback(params: &[(String, String)], expected_state: &st
     }
 }
 
-/// 同時處理中的連線上限；超過時直接關掉新連線，避免被大量閒置連線耗盡資源
-const MAX_ACTIVE_CONNECTIONS: usize = 16;
+/// 同時等待中的連線上限；滿了就關掉最舊的那條，讓新連線（例如真正的 callback）有位置
+const MAX_PENDING_CONNECTIONS: usize = 16;
+/// 每輪最多接受的新連線數；本機程式持續大量建立連線時，迴圈仍會回頭檢查取消與逾時
+const MAX_ACCEPTS_PER_ROUND: usize = 32;
+/// 一條連線從接受到送完請求第一行的時間上限；瀏覽器的 callback 會立刻送出請求，閒置連線超過就關掉
+const CONNECTION_READ_TIMEOUT: Duration = Duration::from_secs(2);
+const MAX_REQUEST_BYTES: usize = 8192;
+const POLL_INTERVAL: Duration = Duration::from_millis(20);
 
-/// 在獨立執行緒讀一條連線並回應；閒置不送資料的連線只會卡住自己的執行緒，不會擋住真正的 callback
-fn handle_connection(mut s: TcpStream, expected_state: &str, zh: bool) -> CallbackResult {
+/// 一條還在等請求內容的連線（非阻塞）
+struct PendingConn {
+    stream: TcpStream,
+    buf: Vec<u8>,
+    since: Instant,
+}
+
+enum ConnPoll {
+    /// 還沒收到完整的請求第一行，繼續等
+    Waiting,
+    /// 已收到請求第一行（或對方關閉連線），可以判讀
+    Ready,
+    /// 讀取錯誤，直接關掉
+    Failed,
+}
+
+/// 非阻塞地讀出目前已到的資料；不會等待，所以閒置連線不會擋住其他連線
+fn poll_conn(c: &mut PendingConn) -> ConnPoll {
+    let mut tmp = [0u8; 2048];
+    loop {
+        match c.stream.read(&mut tmp) {
+            Ok(0) => return ConnPoll::Ready,
+            Ok(n) => {
+                c.buf.extend_from_slice(&tmp[..n]);
+                if c.buf.windows(2).any(|w| w == b"\r\n") || c.buf.len() >= MAX_REQUEST_BYTES {
+                    return ConnPoll::Ready;
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => return ConnPoll::Waiting,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(_) => return ConnPoll::Failed,
+        }
+    }
+}
+
+/// 判讀已收到的請求並回應
+fn finish_conn(c: PendingConn, expected_state: &str, zh: bool) -> CallbackResult {
+    let mut s = c.stream;
+    // 回應只有幾百 bytes，一般會立刻寫完；加上逾時，避免對方不讀資料時卡住
     let _ = s.set_nonblocking(false);
-    let _ = s.set_read_timeout(Some(Duration::from_secs(5)));
-    let mut buf = [0u8; 8192];
-    let n = s.read(&mut buf).unwrap_or(0);
-    let req = String::from_utf8_lossy(&buf[..n]);
+    let _ = s.set_write_timeout(Some(Duration::from_secs(1)));
+    let req = String::from_utf8_lossy(&c.buf);
     let Some(params) = req.lines().next().and_then(parse_callback) else {
         let _ = write!(s, "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
         return CallbackResult::Ignore;
@@ -216,42 +257,67 @@ fn handle_connection(mut s: TcpStream, expected_state: &str, zh: bool) -> Callba
 }
 
 /// 等瀏覽器帶授權碼回來（最多 5 分鐘，可取消）。state 不符的請求一律忽略，避免其他網頁送假的授權碼。
+/// 所有連線都在這個執行緒以非阻塞方式輪詢：不會因為大量連線而開出大量執行緒，閒置連線也不會擋住真正的 callback。
 pub fn wait_for_code(p: &PendingLogin, zh: bool) -> Result<String, String> {
     let deadline = Instant::now() + LOGIN_TIMEOUT;
-    let (tx, rx) = mpsc::channel::<CallbackResult>();
-    let active = Arc::new(AtomicUsize::new(0));
-    loop {
-        while let Ok(r) = rx.try_recv() {
-            match r {
-                CallbackResult::Code(code) => return Ok(code),
-                CallbackResult::Denied => {
-                    return Err(msg(zh, "OpenRouter 沒有回傳授權碼（可能按了拒絕），請重新嘗試。", "OpenRouter returned no authorization code (access may have been denied). Please try again."));
-                }
-                CallbackResult::Ignore => {}
-            }
+    let mut pending: VecDeque<PendingConn> = VecDeque::new();
+    let decide = |r: CallbackResult| -> Option<Result<String, String>> {
+        match r {
+            CallbackResult::Code(code) => Some(Ok(code)),
+            CallbackResult::Denied => Some(Err(msg(
+                zh,
+                "OpenRouter 沒有回傳授權碼（可能按了拒絕），請重新嘗試。",
+                "OpenRouter returned no authorization code (access may have been denied). Please try again.",
+            ))),
+            CallbackResult::Ignore => None,
         }
+    };
+    loop {
         if CANCEL.load(Ordering::SeqCst) {
             return Err(msg(zh, "已取消登入。", "Sign-in cancelled."));
         }
         if Instant::now() > deadline {
             return Err(msg(zh, "等候登入逾時（5 分鐘），請重新嘗試。", "Timed out waiting for sign-in (5 minutes). Please try again."));
         }
+        let mut accepted = 0;
         for l in &p.listeners {
-            while let Ok((s, _)) = l.accept() {
-                if active.load(Ordering::SeqCst) >= MAX_ACTIVE_CONNECTIONS {
-                    drop(s);
+            while accepted < MAX_ACCEPTS_PER_ROUND {
+                let Ok((s, _)) = l.accept() else { break };
+                accepted += 1;
+                if s.set_nonblocking(true).is_err() {
                     continue;
                 }
-                active.fetch_add(1, Ordering::SeqCst);
-                let (tx, active, state) = (tx.clone(), active.clone(), p.state.clone());
-                std::thread::spawn(move || {
-                    let r = handle_connection(s, &state, zh);
-                    active.fetch_sub(1, Ordering::SeqCst);
-                    let _ = tx.send(r);
-                });
+                let mut c = PendingConn { stream: s, buf: Vec::new(), since: Instant::now() };
+                // 接受後馬上讀一次：瀏覽器通常已經送出請求，不必等到下一輪，也不會在同一輪被後來的連線擠掉
+                match poll_conn(&mut c) {
+                    ConnPoll::Ready => {
+                        if let Some(done) = decide(finish_conn(c, &p.state, zh)) {
+                            return done;
+                        }
+                    }
+                    ConnPoll::Failed => {}
+                    ConnPoll::Waiting => {
+                        if pending.len() >= MAX_PENDING_CONNECTIONS {
+                            pending.pop_front();
+                        }
+                        pending.push_back(c);
+                    }
+                }
             }
         }
-        std::thread::sleep(Duration::from_millis(50));
+        for mut c in std::mem::take(&mut pending) {
+            match poll_conn(&mut c) {
+                ConnPoll::Ready => {
+                    if let Some(done) = decide(finish_conn(c, &p.state, zh)) {
+                        return done;
+                    }
+                }
+                ConnPoll::Failed => {}
+                ConnPoll::Waiting if c.since.elapsed() > CONNECTION_READ_TIMEOUT => {}
+                ConnPoll::Waiting => pending.push_back(c),
+            }
+        }
+        std::thread::sleep(POLL_INTERVAL);
     }
 }
 
@@ -435,8 +501,7 @@ pub fn claude_set(origin: &Origin, zh: bool, add: bool) -> Result<bool, String> 
         return Ok(true);
     }
     let exe = this_exe()?;
-    let stamp = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
-    let backup = path.with_file_name(format!("{CONFIG_FILE}.bak-{stamp}"));
+    let backup = backup_path(&path, 0);
     let mut details = vec![msg(zh, &format!("設定檔：{}", path.display()), &format!("Settings file: {}", path.display()))];
     if add {
         details.push(msg(zh, &format!("加入項目「{SERVER_NAME}」：{} --mcp", exe.display()), &format!("Add entry \"{SERVER_NAME}\": {} --mcp", exe.display())));
@@ -459,23 +524,55 @@ pub fn claude_set(origin: &Origin, zh: bool, add: bool) -> Result<bool, String> 
     if !confirm::ask(origin, zh, &action, &details, &warning) {
         return Ok(false);
     }
-    if read_raw(&path).ok() != Some(snapshot.clone()) {
+    let cfg = updated_config(existing.unwrap_or_default(), add.then(|| server_entry(&exe)));
+    apply_confirmed(&path, &snapshot, &backup, &cfg, zh)?;
+    Ok(true)
+}
+
+/// 備份檔名：精確到毫秒；n > 0 時加上流水號（同一毫秒已有備份時使用）
+fn backup_path(path: &Path, n: u32) -> PathBuf {
+    let stamp = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0);
+    let name = if n == 0 { format!("{CONFIG_FILE}.bak-{stamp}") } else { format!("{CONFIG_FILE}.bak-{stamp}-{n}") };
+    path.with_file_name(name)
+}
+
+/// 寫備份，絕不覆寫已有的檔案：preferred 已存在時改用新的時間與流水號。回傳實際寫入的路徑。
+fn write_backup(path: &Path, preferred: &Path, bytes: &[u8]) -> Result<PathBuf, String> {
+    let mut target = preferred.to_path_buf();
+    for n in 1..=100 {
+        match std::fs::OpenOptions::new().write(true).create_new(true).open(&target) {
+            Ok(mut f) => {
+                if let Err(e) = f.write_all(bytes).and_then(|_| f.sync_all()) {
+                    drop(f);
+                    let _ = std::fs::remove_file(&target);
+                    return Err(e.to_string());
+                }
+                return Ok(target);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => target = backup_path(path, n),
+            Err(e) => return Err(e.to_string()),
+        }
+    }
+    Err("could not create a unique backup file name".into())
+}
+
+/// 使用者按確定之後的步驟：確認期間檔案若被改過就不寫入；否則先備份原檔（有的話），再寫入新設定。
+fn apply_confirmed(path: &Path, snapshot: &Option<Vec<u8>>, backup: &Path, cfg: &Map<String, Value>, zh: bool) -> Result<(), String> {
+    if read_raw(path).ok().as_ref() != Some(snapshot) {
         return Err(msg(
             zh,
             "確認視窗開著的期間，Claude Desktop 的設定檔被修改了。為了不蓋掉新的內容，這次沒有寫入，請再按一次。",
             "Claude Desktop's settings file changed while the confirmation dialog was open. Nothing was written so the new content is not overwritten; please try again.",
         ));
     }
-    if let Some(bytes) = &snapshot {
+    if let Some(bytes) = snapshot {
         // 備份的內容就是剛剛比對過、要被改寫的那一版
-        std::fs::write(&backup, bytes).map_err(|e| e.to_string())?;
+        write_backup(path, backup, bytes)?;
     } else if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     }
-    let cfg = updated_config(existing.unwrap_or_default(), add.then(|| server_entry(&exe)));
-    let text = serde_json::to_string_pretty(&Value::Object(cfg)).map_err(|e| e.to_string())?;
-    write_atomic(&path, &text)?;
-    Ok(true)
+    let text = serde_json::to_string_pretty(&Value::Object(cfg.clone())).map_err(|e| e.to_string())?;
+    write_atomic(path, &text)
 }
 
 // ---- 地端模型 ----
@@ -485,16 +582,32 @@ pub fn claude_set(origin: &Origin, zh: bool, add: bool) -> Result<bool, String> 
 pub struct LocalServer {
     pub provider: &'static str,
     pub label: &'static str,
-    pub base_url: &'static str,
+    pub base_url: String,
+    /// 這是使用者在設定裡填的自訂位址（不是預設的 localhost）；套用這裡的模型時要沿用這個位址
+    pub custom: bool,
     pub running: bool,
     pub models: Vec<String>,
 }
 
-pub async fn detect_local() -> Vec<LocalServer> {
-    let servers = [("ollama", "Ollama", "http://localhost:11434/v1"), ("lmstudio", "LM Studio", "http://localhost:1234/v1")];
+const LOCAL_DEFAULTS: [(&str, &str, &str); 2] = [("ollama", "Ollama", "http://localhost:11434/v1"), ("lmstudio", "LM Studio", "http://localhost:1234/v1")];
+
+/// 要偵測的位址：每個地端供應商的預設位址；目前設定是該供應商且填了不同的自訂位址時，再加上那個自訂位址
+pub(crate) fn local_targets(provider: &str, base_url: &str) -> Vec<(&'static str, &'static str, String, bool)> {
+    let custom = base_url.trim().trim_end_matches('/');
+    let mut out = Vec::new();
+    for (p, label, default) in LOCAL_DEFAULTS {
+        out.push((p, label, default.to_string(), false));
+        if p == provider && !custom.is_empty() && !custom.eq_ignore_ascii_case(default) {
+            out.push((p, label, custom.to_string(), true));
+        }
+    }
+    out
+}
+
+pub async fn detect_local(provider: &str, base_url: &str) -> Vec<LocalServer> {
     let Ok(c) = reqwest::Client::builder().timeout(Duration::from_millis(1500)).build() else { return vec![] };
     let mut out = Vec::new();
-    for (provider, label, base) in servers {
+    for (provider, label, base, custom) in local_targets(provider, base_url) {
         let models = match c.get(format!("{base}/models")).send().await {
             Ok(r) if r.status().is_success() => r.json::<Value>().await.ok().map(|v| {
                 let mut ids: Vec<String> = v.get("data").and_then(|d| d.as_array()).into_iter().flatten().filter_map(|m| m.get("id").and_then(|i| i.as_str()).map(String::from)).collect();
@@ -503,7 +616,7 @@ pub async fn detect_local() -> Vec<LocalServer> {
             }),
             _ => None,
         };
-        out.push(LocalServer { provider, label, base_url: base, running: models.is_some(), models: models.unwrap_or_default() });
+        out.push(LocalServer { provider, label, base_url: base, custom, running: models.is_some(), models: models.unwrap_or_default() });
     }
     out
 }
@@ -638,6 +751,193 @@ mod tests {
         assert!(wait_for_code(&p, true).unwrap_err().contains("拒絕"));
         assert!(t0.elapsed() < Duration::from_secs(3));
         assert!(sender.join().unwrap().contains("連結失敗"));
+    }
+
+    #[test]
+    fn full_idle_connections_do_not_block_callback() {
+        let _l = LOGIN_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = LoginGuard::acquire(true).unwrap();
+        let p = start_login().unwrap();
+        let port = p.listeners[0].local_addr().unwrap().port();
+        let state = p.state.clone();
+        let sender = std::thread::spawn(move || {
+            // 開超過上限的閒置連線把位置佔滿，真正的 callback 仍要能被處理（會關掉最舊的閒置連線）
+            let idle: Vec<TcpStream> = (0..MAX_PENDING_CONNECTIONS + 8).map(|_| TcpStream::connect(("127.0.0.1", port)).unwrap()).collect();
+            std::thread::sleep(Duration::from_millis(300));
+            let resp = send(port, &format!("/callback?code=ok&state={state}"));
+            drop(idle);
+            resp
+        });
+        let t0 = Instant::now();
+        assert_eq!(wait_for_code(&p, true).unwrap(), "ok");
+        assert!(t0.elapsed() < Duration::from_secs(3), "等了 {:?}", t0.elapsed());
+        assert!(sender.join().unwrap().contains("已連結 OpenRouter"));
+    }
+
+    #[test]
+    fn connection_flood_does_not_block_cancel() {
+        let _l = LOGIN_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = LoginGuard::acquire(true).unwrap();
+        let p = start_login().unwrap();
+        let port = p.listeners[0].local_addr().unwrap().port();
+        let stop = std::sync::Arc::new(AtomicBool::new(false));
+        // 幾個執行緒不停建立連線（有的閒置、有的立刻關掉），同時在 300ms 後取消登入
+        let flooders: Vec<_> = (0..4)
+            .map(|i| {
+                let stop = stop.clone();
+                std::thread::spawn(move || {
+                    let mut keep = Vec::new();
+                    while !stop.load(Ordering::SeqCst) {
+                        if let Ok(s) = TcpStream::connect(("127.0.0.1", port))
+                            && i % 2 == 0
+                            && keep.len() < 64
+                        {
+                            keep.push(s);
+                        }
+                    }
+                })
+            })
+            .collect();
+        let canceller = std::thread::spawn(|| {
+            std::thread::sleep(Duration::from_millis(300));
+            cancel_login();
+        });
+        let t0 = Instant::now();
+        let r = wait_for_code(&p, true);
+        let elapsed = t0.elapsed();
+        stop.store(true, Ordering::SeqCst);
+        canceller.join().unwrap();
+        for f in flooders {
+            f.join().unwrap();
+        }
+        assert!(r.unwrap_err().contains("取消"));
+        assert!(elapsed < Duration::from_secs(3), "等了 {elapsed:?}");
+    }
+
+    /// 測試用的暫存資料夾（結束時刪除）；不會碰到使用者真正的 Claude Desktop 設定
+    struct TempDir(PathBuf);
+    impl TempDir {
+        fn new() -> Self {
+            let d = std::env::temp_dir().join(format!("pcc-connect-test-{}", random_token().unwrap()));
+            std::fs::create_dir_all(&d).unwrap();
+            TempDir(d)
+        }
+    }
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn backups_in(dir: &Path) -> Vec<PathBuf> {
+        let mut v: Vec<PathBuf> = std::fs::read_dir(dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.file_name().unwrap().to_string_lossy().starts_with(&format!("{CONFIG_FILE}.bak-")))
+            .collect();
+        v.sort();
+        v
+    }
+
+    fn added_cfg(original: &[u8]) -> Map<String, Value> {
+        updated_config(parse_config(original).unwrap(), Some(server_entry(Path::new(r"C:\a\pc-cleanup.exe"))))
+    }
+
+    #[test]
+    fn apply_confirmed_refuses_when_file_changed_during_confirmation() {
+        let t = TempDir::new();
+        let path = t.0.join(CONFIG_FILE);
+        let original = br#"{"globalShortcut":"Ctrl+Space"}"#;
+        std::fs::write(&path, original).unwrap();
+        let snapshot = read_raw(&path).unwrap();
+        // 確認視窗開著的期間，Claude Desktop 改寫了設定檔
+        let changed = br#"{"globalShortcut":"Ctrl+Alt+Space"}"#;
+        std::fs::write(&path, changed).unwrap();
+        let err = apply_confirmed(&path, &snapshot, &backup_path(&path, 0), &added_cfg(original), true).unwrap_err();
+        assert!(err.contains("被修改"), "{err}");
+        assert_eq!(std::fs::read(&path).unwrap(), changed);
+        assert!(backups_in(&t.0).is_empty());
+
+        // 確認前沒有檔案、確認期間才出現：同樣不寫入
+        std::fs::remove_file(&path).unwrap();
+        let none = read_raw(&path).unwrap();
+        assert!(none.is_none());
+        std::fs::write(&path, changed).unwrap();
+        assert!(apply_confirmed(&path, &none, &backup_path(&path, 0), &added_cfg(b"{}"), true).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), changed);
+    }
+
+    #[test]
+    fn apply_confirmed_backs_up_then_writes() {
+        let t = TempDir::new();
+        let path = t.0.join(CONFIG_FILE);
+        let original = br#"{"globalShortcut":"Ctrl+Space"}"#;
+        std::fs::write(&path, original).unwrap();
+        let snapshot = read_raw(&path).unwrap();
+        apply_confirmed(&path, &snapshot, &backup_path(&path, 0), &added_cfg(original), true).unwrap();
+        let written = parse_config(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(written["globalShortcut"], "Ctrl+Space");
+        assert_eq!(written["mcpServers"][SERVER_NAME]["args"][0], "--mcp");
+        let b = backups_in(&t.0);
+        assert_eq!(b.len(), 1);
+        assert_eq!(std::fs::read(&b[0]).unwrap(), original);
+
+        // 沒有原檔時（資料夾也還沒建立）：建立資料夾並寫入，不產生備份
+        let path2 = t.0.join("new-dir").join(CONFIG_FILE);
+        apply_confirmed(&path2, &None, &backup_path(&path2, 0), &added_cfg(b"{}"), true).unwrap();
+        assert!(parse_config(&std::fs::read(&path2).unwrap()).unwrap()["mcpServers"][SERVER_NAME].is_object());
+        assert!(backups_in(&t.0.join("new-dir")).is_empty());
+    }
+
+    #[test]
+    fn backup_never_overwrites_existing_backup() {
+        let t = TempDir::new();
+        let path = t.0.join(CONFIG_FILE);
+        let preferred = backup_path(&path, 0);
+        // 同一個檔名已經有備份（例如同一毫秒內改寫兩次）
+        std::fs::write(&preferred, b"first").unwrap();
+        let second = write_backup(&path, &preferred, b"second").unwrap();
+        assert_ne!(second, preferred);
+        assert_eq!(std::fs::read(&preferred).unwrap(), b"first");
+        assert_eq!(std::fs::read(&second).unwrap(), b"second");
+        assert!(second.file_name().unwrap().to_string_lossy().starts_with(&format!("{CONFIG_FILE}.bak-")));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn read_raw_reports_locked_file_as_error() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let t = TempDir::new();
+        let path = t.0.join(CONFIG_FILE);
+        std::fs::write(&path, b"{}").unwrap();
+        // 以不共用方式開著檔案（模擬被其他程式鎖住）：讀取失敗要回傳錯誤，不能當成「沒有檔案」
+        let lock = std::fs::OpenOptions::new().read(true).write(true).share_mode(0).open(&path).unwrap();
+        assert!(read_raw(&path).is_err());
+        assert!(read_config(&path).is_err());
+        drop(lock);
+        assert_eq!(read_raw(&path).unwrap().unwrap(), b"{}");
+        assert!(read_raw(&t.0.join("missing.json")).unwrap().is_none());
+    }
+
+    #[test]
+    fn local_targets_include_custom_address() {
+        let urls = |p: &str, b: &str| local_targets(p, b).into_iter().map(|(p, _, u, c)| format!("{p} {u} {c}")).collect::<Vec<_>>();
+        let defaults = ["ollama http://localhost:11434/v1 false", "lmstudio http://localhost:1234/v1 false"];
+        assert_eq!(urls("anthropic", ""), defaults);
+        assert_eq!(urls("ollama", ""), defaults);
+        // 與預設位址相同（大小寫、結尾斜線不同）時不重複列出
+        assert_eq!(urls("ollama", "HTTP://localhost:11434/v1/"), defaults);
+        // 別的供應商的自訂位址不會拿來偵測地端模型
+        assert_eq!(urls("custom", "http://10.0.0.5:11434/v1"), defaults);
+        assert_eq!(
+            urls("ollama", "http://10.0.0.5:11434/v1/"),
+            ["ollama http://localhost:11434/v1 false", "ollama http://10.0.0.5:11434/v1 true", "lmstudio http://localhost:1234/v1 false"]
+        );
+        assert_eq!(
+            urls("lmstudio", "http://10.0.0.5:1234/v1"),
+            ["ollama http://localhost:11434/v1 false", "lmstudio http://localhost:1234/v1 false", "lmstudio http://10.0.0.5:1234/v1 true"]
+        );
     }
 
     #[test]

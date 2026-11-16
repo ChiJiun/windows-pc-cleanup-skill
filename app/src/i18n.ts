@@ -246,7 +246,8 @@ const zh = {
   "connect.local.notRunning": "未偵測到，請先開啟 {name}。",
   "connect.local.noModels": "{name} 正在執行，但還沒有安裝模型。",
   "connect.local.use": "點選模型即可使用：",
-  "connect.local.applied": "AI 助理現在使用 {name} 的 {model}。",
+  "connect.local.applied": "AI 助理現在使用 {name}（{url}）的 {model}。",
+  "connect.local.custom": "自訂位址：",
 
   "about.title": "關於與贊助",
   "about.tagline": "Windows 電腦清理與健康檢查工具。",
@@ -507,7 +508,8 @@ const en: Record<MsgKey, string> = {
   "connect.local.notRunning": "Not detected. Start {name} first.",
   "connect.local.noModels": "{name} is running but has no models installed.",
   "connect.local.use": "Click a model to use it:",
-  "connect.local.applied": "The AI Assistant now uses {model} on {name}.",
+  "connect.local.applied": "The AI Assistant now uses {model} on {name} ({url}).",
+  "connect.local.custom": "Custom address: ",
 
   "about.title": "About & Support",
   "about.tagline": "A Windows PC cleanup and health check tool.",

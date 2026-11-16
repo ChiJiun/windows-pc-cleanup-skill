@@ -1,7 +1,7 @@
 // 只在開發模式、而且不在 Tauri 視窗裡時使用的假資料（見 src/backend.ts）。
 // 正式建置時 import.meta.env.DEV 為 false，這個檔案不會被打包進去。
 import type { Api } from "../backend";
-import type { ChatMessage, ProviderId, ProviderPreset, Settings, ToolName, ToolResult } from "../api";
+import type { ChatMessage, LocalServer, ProviderId, ProviderPreset, Settings, ToolName, ToolResult } from "../api";
 
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const GB = 1024 ** 3;
@@ -155,9 +155,16 @@ export const mockApi: Api = {
   },
   detectLocalModels: async () => {
     await delay(400);
-    return [
-      { provider: "ollama", label: "Ollama", baseUrl: "http://localhost:11434/v1", running: true, models: ["mock-local", "mock-local-2"] },
-      { provider: "lmstudio", label: "LM Studio", baseUrl: "http://localhost:1234/v1", running: false, models: [] },
+    const out: LocalServer[] = [
+      { provider: "ollama", label: "Ollama", baseUrl: "http://localhost:11434/v1", custom: false, running: true, models: ["mock-local", "mock-local-2"] },
+      { provider: "lmstudio", label: "LM Studio", baseUrl: "http://localhost:1234/v1", custom: false, running: false, models: [] },
     ];
+    // 與後端相同：目前設定是地端供應商且填了不同的自訂位址時，多列一個自訂位址的項目（假資料：自訂位址上只有 mock-remote）
+    const base = settings.baseUrl.trim().replace(/\/+$/, "");
+    const i = out.findIndex((s) => s.provider === settings.provider);
+    if (i >= 0 && base && base.toLowerCase() !== out[i].baseUrl.toLowerCase()) {
+      out.splice(i + 1, 0, { ...out[i], baseUrl: base, custom: true, running: true, models: ["mock-remote"] });
+    }
+    return out;
   },
 };

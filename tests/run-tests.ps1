@@ -248,6 +248,8 @@ try {
     $custom = Join-Path $mix 'my-logs'; New-Item -ItemType Directory -Path $custom | Out-Null
     'x' | Set-Content (Join-Path $custom 'organize-undo.ps1')
     New-Item -ItemType Directory -Path (Join-Path $mix 'random-folder') | Out-Null
+    # 桌面版建議的隔離資料夾 <root>\_quarantine 也不能被搬走
+    New-Item -ItemType Directory -Path (Join-Path $mix '_quarantine') | Out-Null
     $topBefore = @(Get-ChildItem $mix -Directory | ForEach-Object Name)
     Run 'organize-plan.ps1' @('-SessionDir', $mixSession, '-Root', $mix, '-Lang', 'en') | Out-Null
     $mixPlan2 = @(Get-ChildItem $mixSession -Filter 'organize-plan-*.csv' | Sort-Object LastWriteTime | Select-Object -Last 1)[0].FullName

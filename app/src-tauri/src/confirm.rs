@@ -21,14 +21,34 @@ fn is_layout_char(c: char) -> bool {
     matches!(c, '\u{200E}' | '\u{200F}' | '\u{061C}' | '\u{2028}' | '\u{2029}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
 }
 
+/// 看不見（零寬或顯示成空白）的字元：可以藏字，或和大量空白一起把文字撐到自動換行
+fn is_invisible_char(c: char) -> bool {
+    matches!(c,
+        '\u{00AD}' | '\u{034F}' | '\u{115F}' | '\u{1160}' | '\u{17B4}' | '\u{17B5}' | '\u{180B}'..='\u{180F}'
+        | '\u{200B}'..='\u{200D}' | '\u{2060}'..='\u{2065}' | '\u{206A}'..='\u{206F}' | '\u{2800}' | '\u{3164}'
+        | '\u{FEFF}' | '\u{FFA0}' | '\u{FFF9}'..='\u{FFFB}' | '\u{1D173}'..='\u{1D17A}' | '\u{E0000}'..='\u{E007F}')
+}
+
 /// 標題與每一行細節都可能含有呼叫端（AI／MCP）或檔案內容提供的文字，一律變成單行：
-/// 換行等控制字元換成空白、bidi 控制字元換成「?」，避免插入看起來像正式說明的假段落，或讓路徑反向顯示。
+/// 換行等控制字元與各種空白（含全形空白）換成空白，連續的空白壓成一個（避免用大量空白「軟換行」排出假段落）；
+/// bidi 控制字元與看不見的字元換成「?」，避免讓路徑反向顯示或藏字。
 /// 說明文字（warning）是程式內的固定字串，不處理。
 pub(crate) fn one_line(s: &str) -> String {
-    s.chars()
-        .map(|c| if c.is_control() { ' ' } else if is_layout_char(c) { '?' } else { c })
-        .take(400)
-        .collect()
+    let mut out = String::new();
+    let mut n = 0;
+    for c in s.chars() {
+        // 先判斷 bidi／行分隔字元（U+2028、U+2029 也算空白，但要顯示成「?」）
+        let c = if is_layout_char(c) || is_invisible_char(c) { '?' } else if c.is_control() || c.is_whitespace() { ' ' } else { c };
+        if c == ' ' && out.ends_with(' ') {
+            continue;
+        }
+        if n == 400 {
+            break;
+        }
+        out.push(c);
+        n += 1;
+    }
+    out
 }
 
 pub fn ask(origin: &Origin, zh: bool, action: &str, details: &[String], warning: &str) -> bool {
@@ -74,7 +94,13 @@ mod tests {
 
     #[test]
     fn caller_text_becomes_one_line() {
-        assert_eq!(one_line("a\r\nb\tc"), "a  b c");
+        assert_eq!(one_line("a\r\nb\tc"), "a b c");
+        // 大量空白（含全形空白、不換行空白）壓成一個，不能用來撐出自動換行的假段落
+        assert_eq!(one_line(&format!("x{}✔ 安全", " ".repeat(200))), "x ✔ 安全");
+        assert_eq!(one_line("x\u{3000}\u{3000}\u{00A0}\u{2003}y"), "x y");
+        // 看不見的字元換成「?」
+        assert_eq!(one_line("a\u{200B}b\u{FEFF}c\u{00AD}d\u{2800}e\u{3164}f\u{2061}g"), "a?b?c?d?e?f?g");
+        assert_eq!(one_line(&format!("{}x", "\u{200B} ".repeat(300))).chars().count(), 400);
         assert_eq!(one_line("x\u{202E}gpj.exe"), "x?gpj.exe");
         assert_eq!(one_line("p\u{2066}q\u{2028}r"), "p?q?r");
         assert_eq!(one_line(&"字".repeat(500)).chars().count(), 400);

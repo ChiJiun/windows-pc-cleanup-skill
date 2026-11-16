@@ -7,6 +7,7 @@ A Windows desktop app (Tauri 2 + React) built on the same PowerShell scripts as 
 - **Works without AI**: the Cleanup wizard runs scan → select → confirm → clean → report on its own.
 - **Bring your own model**: the AI assistant tab talks to Anthropic Claude, OpenAI, Google Gemini, xAI Grok, Ollama, LM Studio, or any OpenAI-compatible endpoint. API keys are stored in Windows Credential Manager, never in a file.
 - **MCP server**: `pc-cleanup.exe --mcp` exposes the same tools over stdio to MCP clients such as Claude Desktop, Claude Code, Cursor, LM Studio, and Gemini CLI. Settings → MCP shows a config snippet to paste.
+- **One-click connect** (Settings): *Sign in with OpenRouter* (browser sign-in, OAuth PKCE; one account covers Claude, GPT, Gemini and Grok, billed to your OpenRouter credits), *Add to Claude Desktop* (writes the MCP entry into `claude_desktop_config.json` after a confirmation dialog and a backup, so you can use your own Claude subscription there), and *Detect local models* (Ollama, LM Studio). Claude Pro/Max subscriptions cannot be used directly by third-party apps; Anthropic's terms only allow that inside Anthropic's own apps, which is why the Claude Desktop route exists.
 
 ## Safety model
 
@@ -49,6 +50,11 @@ Set your account names in `src/funding.ts` (desktop app) and `.github/FUNDING.ym
 - **不接 AI 也能用**：「清理精靈」可以獨立完成「掃描 → 勾選 → 確認 → 清理 → 報告」。
 - **自選模型**：「AI 助理」可以連 Anthropic Claude、OpenAI、Google Gemini、xAI Grok、Ollama、LM Studio，或任何 OpenAI 相容端點。API key 存在 Windows 認證管理員，不會寫進檔案。
 - **MCP server**：`pc-cleanup.exe --mcp` 會以 stdio 提供同一套工具，給 Claude Desktop、Claude Code、Cursor、LM Studio、Gemini CLI 等 MCP 用戶端使用。「設定 → MCP」有可以直接貼上的設定片段。
+- **一鍵連結**（設定頁）：
+  - 「用 OpenRouter 登入」：在瀏覽器登入（OAuth PKCE），一個帳號就能用 Claude、GPT、Gemini、Grok，費用由 OpenRouter 額度支付。
+  - 「加入 Claude Desktop」：跳確認視窗並備份後，把 MCP 項目寫進 `claude_desktop_config.json`，讓你用自己的 Claude 訂閱。
+  - 「偵測地端模型」：Ollama、LM Studio。
+  - Claude Pro/Max 訂閱不能直接給第三方程式使用（Anthropic 條款只允許在 Anthropic 自家程式裡使用），所以提供 Claude Desktop 這條路。
 
 ### 安全設計
 

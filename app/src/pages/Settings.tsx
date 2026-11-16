@@ -3,6 +3,7 @@ import { useEffect, useState } from "react";
 import type { Lang, ProviderId, ProviderPreset, Settings as SettingsT } from "../api";
 import { api } from "../backend";
 import { ErrorBanner, Notice, Spinner } from "../components/common";
+import { ConnectCard } from "../components/ConnectCard";
 import { errorText } from "../format";
 import { useI18n } from "../i18n";
 
@@ -168,6 +169,14 @@ export function Settings({ settings, presets, onSaved, onKeyChanged }: Props) {
     }
   }
 
+  // 一鍵連結改了供應商或模型：已經存好，直接同步草稿與上層
+  function applied(s: SettingsT) {
+    setModels(null);
+    setKeyInput("");
+    setDraft(s);
+    onSaved(s);
+  }
+
   async function copyMcp() {
     if (!mcp) return;
     const ok = await copyText(mcp);
@@ -194,6 +203,15 @@ export function Settings({ settings, presets, onSaved, onKeyChanged }: Props) {
           </select>
         </div>
       </section>
+
+      <ConnectCard
+        settings={settings}
+        onApplied={applied}
+        onKeyChanged={() => {
+          onKeyChanged("openrouter");
+          if (draft?.provider === "openrouter") api.hasApiKey("openrouter").then(setDraftHasKey).catch(() => {});
+        }}
+      />
 
       <section className="card">
         <h2>{t("settings.ai")}</h2>

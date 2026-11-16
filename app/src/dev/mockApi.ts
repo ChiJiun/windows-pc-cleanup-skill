@@ -9,10 +9,18 @@ const MB = 1024 ** 2;
 
 let settings: Settings = { lang: "zh-TW", provider: "anthropic", model: "", baseUrl: "", redact: true };
 const keys = new Set<ProviderId>();
+let claudeStatus = {
+  found: true,
+  configPath: "C:\\mock\\Claude\\claude_desktop_config.json",
+  connected: false,
+  pointsToThisExe: false,
+  invalidJson: false,
+};
 
 const presets: ProviderPreset[] = [
   { id: "anthropic", label: "Anthropic", needsKey: true, local: false, defaultBaseUrl: "https://api.anthropic.com", defaultModel: "mock-model-a" },
   { id: "openai", label: "OpenAI", needsKey: true, local: false, defaultBaseUrl: "https://api.openai.com/v1", defaultModel: "mock-model-b" },
+  { id: "openrouter", label: "OpenRouter", needsKey: true, local: false, defaultBaseUrl: "https://openrouter.ai/api/v1", defaultModel: "openrouter/auto" },
   { id: "ollama", label: "Ollama", needsKey: false, local: true, defaultBaseUrl: "http://localhost:11434", defaultModel: "mock-local" },
   { id: "custom", label: "Custom (OpenAI-compatible)", needsKey: true, local: false, defaultBaseUrl: "", defaultModel: "" },
 ];
@@ -133,4 +141,23 @@ export const mockApi: Api = {
   },
   mcpConfig: async () =>
     JSON.stringify({ mcpServers: { "pc-cleanup": { command: "C:\\mock\\app.exe", args: ["--mcp"] } } }, null, 2),
+  openrouterLogin: async () => {
+    await delay(1500);
+    keys.add("openrouter");
+    settings = { ...settings, provider: "openrouter", model: "openrouter/auto", baseUrl: "" };
+  },
+  openrouterCancel: async () => {},
+  claudeDesktopStatus: async () => ({ ...claudeStatus }),
+  claudeDesktopConnect: async (add) => {
+    await delay(500);
+    claudeStatus = { ...claudeStatus, connected: add, pointsToThisExe: add };
+    return true;
+  },
+  detectLocalModels: async () => {
+    await delay(400);
+    return [
+      { provider: "ollama", label: "Ollama", baseUrl: "http://localhost:11434/v1", running: true, models: ["mock-local", "mock-local-2"] },
+      { provider: "lmstudio", label: "LM Studio", baseUrl: "http://localhost:1234/v1", running: false, models: [] },
+    ];
+  },
 };

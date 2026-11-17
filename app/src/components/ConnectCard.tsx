@@ -13,6 +13,13 @@ interface Props {
   onKeyChanged: () => void;
 }
 
+/** 目前的設定是否就是「這個位址上的這個模型」（預設位址：設定留空或填的就是預設位址） */
+function isCurrent(settings: Settings, server: LocalServer, model: string): boolean {
+  if (settings.provider !== server.provider || settings.model !== model) return false;
+  const base = settings.baseUrl.trim().replace(/\/+$/, "").toLowerCase();
+  return server.custom ? base === server.baseUrl.toLowerCase() : base === "" || base === server.baseUrl.toLowerCase();
+}
+
 export function ConnectCard({ settings, onApplied, onKeyChanged }: Props) {
   const { t } = useI18n();
   const [error, setError] = useState<string | null>(null);
@@ -90,14 +97,15 @@ export function ConnectCard({ settings, onApplied, onKeyChanged }: Props) {
   async function applyLocal(server: LocalServer, model: string) {
     if (!settings) return;
     setError(null);
-    // 以已儲存的設定為基礎（設定頁上尚未儲存的草稿不會被一起存進去）；
-    // 原本就是同一個供應商時保留自訂的位址（例如另一台電腦上的 Ollama），換供應商時才改回預設位址
-    const baseUrl = settings.provider === server.provider ? settings.baseUrl : "";
+    // 以已儲存的設定為基礎（設定頁上尚未儲存的草稿不會被一起存進去）。
+    // 位址跟著「模型是從哪個位址偵測到的」走：自訂位址（例如另一台電腦上的 Ollama）上的模型就沿用自訂位址，
+    // 預設 localhost 上的模型就改回預設位址（留空），避免選到的模型在實際連線的位址上不存在
+    const baseUrl = server.custom ? server.baseUrl : "";
     const next: Settings = { ...settings, provider: server.provider, model, baseUrl };
     try {
       await api.saveSettings(next);
       onApplied(next);
-      setInfo(t("connect.local.applied", { name: server.label, model }));
+      setInfo(t("connect.local.applied", { name: server.label, model, url: server.baseUrl }));
     } catch (e) {
       setError(errorText(e));
     }
@@ -176,9 +184,15 @@ export function ConnectCard({ settings, onApplied, onKeyChanged }: Props) {
         {localBusy && <Spinner />}
       </div>
       {local?.map((s) => (
-        <div key={s.provider} className="form-hint">
+        <div key={`${s.provider} ${s.baseUrl}`} className="form-hint">
           <strong className="small">{s.label}</strong>{" "}
-          {!s.running ? (
+          <span className="muted small">
+            {s.custom ? t("connect.local.custom") : ""}
+            {s.baseUrl}
+          </span>{" "}
+          {s.unsupported ? (
+            <span className="muted small">{t("connect.local.unsupported")}</span>
+          ) : !s.running ? (
             <span className="muted small">{t("connect.local.notRunning", { name: s.label })}</span>
           ) : s.models.length === 0 ? (
             <span className="muted small">{t("connect.local.noModels", { name: s.label })}</span>
@@ -190,7 +204,7 @@ export function ConnectCard({ settings, onApplied, onKeyChanged }: Props) {
                   <button
                     key={m}
                     type="button"
-                    className={`chip ${settings?.provider === s.provider && settings.model === m ? "chip-on" : ""}`}
+                    className={`chip ${settings && isCurrent(settings, s, m) ? "chip-on" : ""}`}
                     onClick={() => applyLocal(s, m)}
                   >
                     {m}
